@@ -9,13 +9,12 @@ import {
 
 // ============ Firebase 설정 ============
 const firebaseConfig = {
-  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
-  authDomain: "egg-production-manager.firebaseapp.com",
-  projectId: "egg-production-manager",
-  storageBucket: "egg-production-manager.firebasestorage.app",
-  messagingSenderId: "891063225076",
-  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
-  measurementId: "G-4BQTZ8YFRJ"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 const app = initializeApp(firebaseConfig);
@@ -133,6 +132,17 @@ export default function EggProductionManager() {
     return () => { if (unsubRecords) unsubRecords(); };
   }, []);
   
+  // 숫자 입력칸에서 휠 스크롤로 값이 변경되는 것 방지
+  useEffect(() => {
+    const handleWheel = (e) => {
+      if (e.target.type === 'number' && document.activeElement === e.target) {
+        e.target.blur();
+      }
+    };
+    document.addEventListener('wheel', handleWheel, { passive: true });
+    return () => document.removeEventListener('wheel', handleWheel);
+  }, []);
+  
   const saveRecord = async (record) => {
     setSaving(true);
     try {
@@ -169,7 +179,9 @@ export default function EggProductionManager() {
   // ============ 폼 ============
   const [incomingForm, setIncomingForm] = useState({
     date: todayDate, farmId: '', supplier: '', eggMark: '', vehicle: '',
-    quantity: '', note: ''
+    // 등급별 수량: { 특: 0, 대: 0, 중: 0, 왕: 0 }
+    grades: { '왕': '', '특': '', '대': '', '중': '' },
+    note: ''
   });
   
   const [productionForm, setProductionForm] = useState({
@@ -190,8 +202,24 @@ export default function EggProductionManager() {
   
   // ============ 입고 ============
   const handleIncomingSubmit = async () => {
-    if (!incomingForm.supplier || !incomingForm.quantity) {
-      alert('공급처(농장명)와 수량(판)을 입력해주세요.');
+    if (!incomingForm.supplier) {
+      alert('공급처(농장명)를 입력해주세요.');
+      return;
+    }
+    
+    // 등급별 수량 정리 (값이 입력된 것만)
+    const gradeQuantities = {};
+    let totalQuantity = 0;
+    HQ_GRADES.forEach(grade => {
+      const q = parseInt(incomingForm.grades[grade]) || 0;
+      if (q > 0) {
+        gradeQuantities[grade] = q;
+        totalQuantity += q;
+      }
+    });
+    
+    if (totalQuantity === 0) {
+      alert('최소 1개 등급에 수량을 입력해주세요.');
       return;
     }
     
@@ -204,23 +232,30 @@ export default function EggProductionManager() {
     const record = {
       id: `inc_${Date.now()}`, type: 'incoming', site: activeSite,
       date: incomingForm.date, 
-      lotNo,                      // 🆕 Lot 번호
+      lotNo,
       farmId: incomingForm.farmId || null,
       farmName: farm?.name || incomingForm.supplier,
       farmRegNo: farm?.regNo || '',
       farmAddress: farm?.address || '',
-      farmCode: farm?.farmCode || '',  // 농장번호 (난각용)
+      farmCode: farm?.farmCode || '',
       supplier: incomingForm.supplier,
-      eggMark: incomingForm.eggMark,    // 🆕 난각 표시
-      vehicle: incomingForm.vehicle,    // 🆕 차량번호
-      quantity: parseInt(incomingForm.quantity), unit: '판',
-      remainingPans: parseInt(incomingForm.quantity), // 🆕 남은 판수 (생산에 쓰면 차감)
+      eggMark: incomingForm.eggMark,
+      vehicle: incomingForm.vehicle,
+      quantity: totalQuantity,                // 총 수량 (호환성)
+      gradeQuantities: gradeQuantities,       // 🆕 등급별 수량
+      unit: '판',
+      remainingPans: totalQuantity,
       note: incomingForm.note, 
       createdAt: new Date().toISOString()
     };
     if (await saveRecord(record)) {
-      setIncomingForm({ date: todayDate, farmId: '', supplier: '', eggMark: '', vehicle: '', quantity: '', note: '' });
-      alert(`입고 저장 완료\nLot 번호: ${lotNo}\n농장: ${record.farmName}\n수량: ${record.quantity}판`);
+      setIncomingForm({ 
+        date: todayDate, farmId: '', supplier: '', eggMark: '', vehicle: '', 
+        grades: { '왕': '', '특': '', '대': '', '중': '' },
+        note: '' 
+      });
+      const gradeStr = Object.entries(gradeQuantities).map(([g, q]) => `${g}란 ${q.toLocaleString()}판`).join(', ');
+      alert(`입고 저장 완료\nLot 번호: ${lotNo}\n농장: ${record.farmName}\n수량: ${gradeStr}\n합계: ${totalQuantity.toLocaleString()}판`);
     }
   };
   
@@ -753,6 +788,15 @@ export default function EggProductionManager() {
           box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12);
         }
         select.input-field { cursor: pointer; }
+        /* 숫자 입력칸 휠 스크롤로 값 변경 방지 */
+        input[type="number"] {
+          -moz-appearance: textfield;
+        }
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
       `}</style>
     </div>
   );
@@ -1128,6 +1172,16 @@ function Field({ label, required, children, className = '' }) {
 
 // 🆕 입고 폼 (역학조사 정보 포함)
 function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, onOpenFarmManager, todayRecords, onDelete, site, fmt }) {
+  // 등급별 수량 합계 계산
+  const totalPans = HQ_GRADES.reduce((sum, g) => sum + (parseInt(form.grades?.[g]) || 0), 0);
+  
+  const updateGrade = (grade, value) => {
+    setForm({
+      ...form,
+      grades: { ...form.grades, [grade]: value }
+    });
+  };
+  
   return (
     <FormCard title={`원란 입고 - ${site === 'hq' ? '본점' : '지점'}`} icon={Package} color="blue">
       {/* 역학조사 안내 */}
@@ -1140,12 +1194,12 @@ function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, on
         </div>
       </div>
       
+      {/* 기본 정보 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Field label="입고 날짜">
           <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
         </Field>
         
-        {/* 🆕 농장 선택 (마스터 등록된 곳에서) */}
         <Field label="등록 농장 선택 (선택)">
           <div className="flex gap-2">
             <select value={form.farmId} onChange={e => onSelectFarm(e.target.value)} className="input-field flex-1">
@@ -1164,31 +1218,65 @@ function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, on
           <input type="text" value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})} placeholder="예: 00농장" className="input-field" />
         </Field>
         
-        {/* 🆕 난각표시 */}
         <Field label="난각 표시" required>
           <input type="text" value={form.eggMark} onChange={e => setForm({...form, eggMark: e.target.value})} placeholder="예: 1206 M3FDS 2" className="input-field font-mono" />
         </Field>
         
-        {/* 🆕 차량번호 */}
         <Field label="운반 차량번호" required>
           <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="예: 12가 3456" className="input-field" />
         </Field>
         
-        <Field label="입고 수량 (판)" required>
-          <input type="number" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} placeholder="예: 500" className="input-field text-lg font-semibold" inputMode="numeric" />
-        </Field>
-        
-        <Field label="비고" className="md:col-span-2">
+        <Field label="비고">
           <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택사항" className="input-field" />
         </Field>
       </div>
       
-      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+      {/* 🆕 등급별 입고 수량 */}
+      <div className="mt-5 p-4 bg-blue-50 border-2 border-blue-200 rounded-xl">
+        <div className="flex items-center justify-between mb-3">
+          <label className="text-sm font-bold text-blue-900 flex items-center gap-2">
+            <Egg className="w-4 h-4" />등급별 입고 수량 (판)
+            <span className="text-red-500">*</span>
+          </label>
+          <span className="text-xs text-blue-700">
+            합계: <b className="text-base">{fmt(totalPans)}판</b>
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {HQ_GRADES.map(grade => {
+            const colorMap = {
+              '왕': 'bg-purple-50 border-purple-300 text-purple-900',
+              '특': 'bg-amber-50 border-amber-300 text-amber-900',
+              '대': 'bg-emerald-50 border-emerald-300 text-emerald-900',
+              '중': 'bg-sky-50 border-sky-300 text-sky-900',
+            };
+            return (
+              <div key={grade} className={`p-3 rounded-lg border-2 ${colorMap[grade]}`}>
+                <label className="block text-xs font-bold mb-1.5 opacity-80">{grade}란</label>
+                <input
+                  type="number"
+                  value={form.grades?.[grade] || ''}
+                  onChange={e => updateGrade(grade, e.target.value)}
+                  placeholder="0"
+                  className="w-full px-3 py-2 bg-white border border-current/30 rounded-md text-lg font-bold text-stone-900 focus:outline-none focus:ring-2 focus:ring-current/40"
+                  inputMode="numeric"
+                />
+                <div className="text-xs mt-1 opacity-70">판</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="text-xs text-blue-700 mt-2">
+          💡 입고된 등급만 입력하시면 됩니다. 빈 칸은 입고 안 된 것으로 처리됩니다.
+        </div>
+      </div>
+      
+      <div className="mt-4 p-3 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-600">
         💡 저장하면 <b>Lot 번호가 자동 생성</b>됩니다 (예: L-260425-001). 생산 시 어느 Lot을 사용했는지 선택하면 출고까지 자동 추적됩니다.
       </div>
       
-      <button onClick={onSubmit} disabled={saving} className="w-full mt-5 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
-        <Plus className="w-5 h-5" />{saving ? '저장 중...' : '입고 등록 (Lot 번호 자동 생성)'}
+      <button onClick={onSubmit} disabled={saving || totalPans === 0} className="w-full mt-5 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
+        <Plus className="w-5 h-5" />{saving ? '저장 중...' : `입고 등록 (총 ${fmt(totalPans)}판)`}
       </button>
       
       <TodayList 
@@ -1198,7 +1286,18 @@ function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, on
           { header: '농장', render: r => <span className="font-medium text-stone-800">{r.farmName || r.supplier}</span> },
           { header: '난각', render: r => <span className="font-mono text-xs text-stone-600">{r.eggMark || '-'}</span> },
           { header: '차량', render: r => <span className="text-xs text-stone-600">{r.vehicle || '-'}</span> },
-          { header: '수량', align: 'right', render: r => <span className="font-bold text-blue-600">{fmt(r.quantity)}판</span> },
+          { header: '등급별 수량', render: r => (
+            <div className="text-xs space-y-0.5">
+              {r.gradeQuantities ? (
+                Object.entries(r.gradeQuantities).map(([g, q]) => (
+                  <div key={g}><span className="font-medium">{g}란</span> <span className="text-stone-600">{fmt(q)}판</span></div>
+                ))
+              ) : (
+                <span className="text-stone-500">{fmt(r.quantity)}판</span>
+              )}
+            </div>
+          )},
+          { header: '합계', align: 'right', render: r => <span className="font-bold text-blue-600">{fmt(r.quantity)}판</span> },
         ]}
       />
     </FormCard>
@@ -1236,16 +1335,27 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
             {recentLots.map(lot => {
               const selected = form.sourceLots.includes(lot.lotNo);
               return (
-                <label key={lot.id} className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition ${
+                <label key={lot.id} className={`flex items-start gap-3 p-2.5 rounded-lg cursor-pointer transition ${
                   selected ? 'bg-amber-200 border-2 border-amber-500' : 'bg-white border border-stone-200 hover:border-amber-400'
                 }`}>
-                  <input type="checkbox" checked={selected} onChange={() => onToggleLot(lot.lotNo)} className="w-4 h-4" />
-                  <div className="flex-1 grid grid-cols-12 gap-2 items-center text-sm">
-                    <span className="col-span-3 font-mono font-bold text-amber-700">{lot.lotNo}</span>
-                    <span className="col-span-2 text-stone-500 text-xs">{lot.date}</span>
-                    <span className="col-span-3 font-medium text-stone-800">{lot.farmName || lot.supplier}</span>
-                    <span className="col-span-2 text-stone-600 text-xs font-mono">{lot.eggMark || '-'}</span>
-                    <span className="col-span-2 text-right font-bold text-stone-900">{fmt(lot.quantity)}판</span>
+                  <input type="checkbox" checked={selected} onChange={() => onToggleLot(lot.lotNo)} className="w-4 h-4 mt-1" />
+                  <div className="flex-1">
+                    <div className="grid grid-cols-12 gap-2 items-center text-sm">
+                      <span className="col-span-3 font-mono font-bold text-amber-700">{lot.lotNo}</span>
+                      <span className="col-span-2 text-stone-500 text-xs">{lot.date}</span>
+                      <span className="col-span-3 font-medium text-stone-800">{lot.farmName || lot.supplier}</span>
+                      <span className="col-span-2 text-stone-600 text-xs font-mono">{lot.eggMark || '-'}</span>
+                      <span className="col-span-2 text-right font-bold text-stone-900">{fmt(lot.quantity)}판</span>
+                    </div>
+                    {lot.gradeQuantities && Object.keys(lot.gradeQuantities).length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1.5 text-xs">
+                        {Object.entries(lot.gradeQuantities).map(([g, q]) => (
+                          <span key={g} className="px-1.5 py-0.5 bg-stone-100 text-stone-700 rounded">
+                            {g}란 {fmt(q)}판
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </label>
               );
