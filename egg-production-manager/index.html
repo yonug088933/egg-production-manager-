@@ -5,9 +5,94 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#f59e0b" />
     <title>계란 생산 관리 시스템</title>
+    <style>
+      /* 즉시 보여주는 스플래시 화면 - HTML 로드되자마자 보임 */
+      #initial-splash {
+        position: fixed;
+        inset: 0;
+        background: linear-gradient(135deg, #fef3c7 0%, #fed7aa 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Malgun Gothic', sans-serif;
+      }
+      #initial-splash .splash-content {
+        text-align: center;
+      }
+      #initial-splash .splash-icon {
+        width: 64px;
+        height: 64px;
+        background: #f59e0b;
+        border-radius: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 16px;
+        box-shadow: 0 10px 25px rgba(245, 158, 11, 0.3);
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+      }
+      #initial-splash .splash-title {
+        color: #44403c;
+        font-weight: bold;
+        font-size: 18px;
+        margin: 0;
+      }
+      #initial-splash .splash-subtitle {
+        color: #78716c;
+        font-size: 12px;
+        margin-top: 4px;
+      }
+      #initial-splash .splash-spinner {
+        width: 24px;
+        height: 24px;
+        border: 3px solid #fde68a;
+        border-top-color: #f59e0b;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin: 16px auto 8px;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      /* React 로드되면 사라짐 */
+      .app-loaded #initial-splash {
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+      }
+    </style>
   </head>
   <body>
+    <div id="initial-splash">
+      <div class="splash-content">
+        <div class="splash-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22c6.23-.05 7.87-5.57 7.5-10-.36-4.34-3.95-9.96-7.5-10-3.55.04-7.14 5.66-7.5 10-.37 4.43 1.27 9.95 7.5 10z"/>
+          </svg>
+        </div>
+        <p class="splash-title">계란 생산 관리 시스템</p>
+        <div class="splash-spinner"></div>
+        <p class="splash-subtitle">로딩 중...</p>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      // React 마운트 후 스플래시 페이드 아웃
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          document.body.classList.add('app-loaded');
+          setTimeout(function() {
+            var splash = document.getElementById('initial-splash');
+            if (splash) splash.remove();
+          }, 400);
+        }, 100);
+      });
+    </script>
   </body>
 </html>

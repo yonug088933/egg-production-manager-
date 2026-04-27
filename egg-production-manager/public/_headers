@@ -1,0 +1,21 @@
+# Cloudflare Pages 캐시 설정
+# 정적 자산(JS/CSS)은 1년 캐싱 (파일명에 해시 있어서 변경되면 자동 갱신됨)
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML은 짧게 캐싱 (변경 시 빠르게 반영)
+/*.html
+  Cache-Control: public, max-age=300
+
+/
+  Cache-Control: public, max-age=300
+
+# 이미지/폰트
+/*.svg
+  Cache-Control: public, max-age=86400
+/*.png
+  Cache-Control: public, max-age=86400
+/*.jpg
+  Cache-Control: public, max-age=86400
+/*.woff2
+  Cache-Control: public, max-age=31536000

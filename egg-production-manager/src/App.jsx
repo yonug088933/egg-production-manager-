@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Package, TrendingUp, Clock, Truck, AlertCircle, BarChart3, Calendar, Plus, Trash2, Download, RefreshCw, Egg, Factory, Building2, Store, Settings, X, Cloud, CloudOff, Search, Shield, FileText, MapPin, Hash, Truck as TruckIcon } from 'lucide-react';
+import { Package, TrendingUp, Clock, Truck, AlertCircle, BarChart3, Calendar, Plus, Trash2, Download, RefreshCw, Egg, Factory, Building2, Store, Settings, X, Cloud, CloudOff, Search, Shield, FileText, MapPin, Hash, Truck as TruckIcon, ClipboardCheck, CheckCircle2, Circle } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
 import { initializeApp } from 'firebase/app';
 import { 
-  getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc, query, orderBy 
+  getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc, query, orderBy, where, limit 
 } from 'firebase/firestore';
 
 // ============ Firebase 설정 ============
@@ -56,7 +56,12 @@ const DEFAULT_BR_PRODUCTS = [
   { id: 'br_ha_25_1', brand: '하림', name: '1등급 25구', packType: 'BOX', perPack: 8 },
 ];
 
-const DEFAULT_OUTBOUND_PARTNER = '모하지 (3PL)';
+const DEFAULT_OUTBOUND_PARTNER_HQ = '모하지 (3PL)';
+
+// 지점 출고처 (브랜드별)
+const DEFAULT_BRANCH_PARTNERS = [
+  '청정원', 'CJ', '하림', '코스트코', '직접 입력'
+];
 
 const pansToPallets = (pans, panPerPallet) => {
   if (!pans || !panPerPallet) return { pallets: 0, remainder: 0, decimal: 0 };
@@ -80,6 +85,7 @@ export default function EggProductionManager() {
   const [activeSite, setActiveSite] = useState('overview');
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(true);
   
@@ -97,8 +103,18 @@ export default function EggProductionManager() {
     let unsubRecords;
     
     try {
+      // 🚀 최적화: 최근 60일치 데이터만 로드 (역학조사 충분히 가능)
+      const sixtyDaysAgo = new Date();
+      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+      const cutoffDate = sixtyDaysAgo.toISOString().split('T')[0];
+      
       unsubRecords = onSnapshot(
-        query(collection(db, 'records'), orderBy('createdAt', 'desc')),
+        query(
+          collection(db, 'records'), 
+          where('date', '>=', cutoffDate),
+          orderBy('date', 'desc'),
+          limit(2000)
+        ),
         (snap) => {
           const loaded = [];
           snap.forEach(d => loaded.push({ id: d.id, ...d.data() }));
@@ -106,21 +122,55 @@ export default function EggProductionManager() {
           setOnline(true);
           setLoading(false);
         },
-        (err) => { console.error(err); setOnline(false); setLoading(false); }
+        (err) => { 
+          console.error(err); 
+          // 인덱스 에러나 호환성 문제 시 fallback (전체 로드)
+          if (err.code === 'failed-precondition') {
+            console.log('인덱스 없음 - 전체 로드로 fallback');
+            unsubRecords = onSnapshot(
+              query(collection(db, 'records'), orderBy('createdAt', 'desc'), limit(2000)),
+              (snap) => {
+                const loaded = [];
+                snap.forEach(d => loaded.push({ id: d.id, ...d.data() }));
+                setRecords(loaded);
+                setOnline(true);
+                setLoading(false);
+              },
+              (e) => { console.error(e); setOnline(false); setLoading(false); }
+            );
+          } else {
+            setOnline(false); 
+            setLoading(false);
+          }
+        }
       );
       
-      getDoc(doc(db, 'settings', 'hqSpecs')).then(snap => {
-        if (snap.exists() && snap.data().specs) setHqSpecs(snap.data().specs);
-        else setDoc(doc(db, 'settings', 'hqSpecs'), { specs: buildDefaultHqSpecs() });
-      });
-      
-      getDoc(doc(db, 'settings', 'brProducts')).then(snap => {
-        if (snap.exists() && snap.data().products) setBrProducts(snap.data().products);
-        else setDoc(doc(db, 'settings', 'brProducts'), { products: DEFAULT_BR_PRODUCTS });
-      });
-      
-      getDoc(doc(db, 'settings', 'farms')).then(snap => {
-        if (snap.exists() && snap.data().farms) setFarms(snap.data().farms);
+      // 🚀 최적화: 설정 데이터 병렬 로딩 (Promise.all)
+      Promise.all([
+        getDoc(doc(db, 'settings', 'hqSpecs')),
+        getDoc(doc(db, 'settings', 'brProducts')),
+        getDoc(doc(db, 'settings', 'farms'))
+      ]).then(([hqSnap, brSnap, farmSnap]) => {
+        if (hqSnap.exists() && hqSnap.data().specs) {
+          setHqSpecs(hqSnap.data().specs);
+        } else {
+          setDoc(doc(db, 'settings', 'hqSpecs'), { specs: buildDefaultHqSpecs() });
+        }
+        
+        if (brSnap.exists() && brSnap.data().products) {
+          setBrProducts(brSnap.data().products);
+        } else {
+          setDoc(doc(db, 'settings', 'brProducts'), { products: DEFAULT_BR_PRODUCTS });
+        }
+        
+        if (farmSnap.exists() && farmSnap.data().farms) {
+          setFarms(farmSnap.data().farms);
+        }
+        
+        setSettingsLoaded(true);
+      }).catch(e => {
+        console.error('설정 로딩 오류:', e);
+        setSettingsLoaded(true); // 에러여도 진행
       });
       
     } catch (e) {
@@ -161,6 +211,24 @@ export default function EggProductionManager() {
     } catch (e) { alert('삭제 오류: ' + e.message); }
   };
   
+  // 🆕 출고 진행 상태 업데이트
+  const updateShipmentStatus = async (record, statusKey, value, dateValue = '') => {
+    const updated = {
+      ...record,
+      status: {
+        ...(record.status || { shipped: true, shippedAt: record.createdAt }),
+        [statusKey]: value,
+        [`${statusKey === 'delivered' ? 'deliveredDate' 
+            : statusKey === 'ecountEntered' ? 'ecountDate'
+            : statusKey === 'reported' ? 'reportedDate' 
+            : ''}`]: dateValue || (value ? todayDate : '')
+      }
+    };
+    try {
+      await setDoc(doc(db, 'records', record.id), updated);
+    } catch (e) { alert('상태 업데이트 오류: ' + e.message); }
+  };
+  
   const saveHqSpecs = async (specs) => {
     try { await setDoc(doc(db, 'settings', 'hqSpecs'), { specs }); setHqSpecs(specs); }
     catch (e) { alert('저장 오류'); }
@@ -193,12 +261,20 @@ export default function EggProductionManager() {
   
   const [shipmentForm, setShipmentForm] = useState({
     date: todayDate,
-    partner: DEFAULT_OUTBOUND_PARTNER,
+    partner: DEFAULT_OUTBOUND_PARTNER_HQ,
     vehicle: '', driver: '',
     sourceProductions: [], // 출고된 생산 기록 ID들 (자동 또는 수동)
     items: [{ specId: '', pans: '', boxes: '', quantity: '' }],
     note: ''
   });
+  
+  // 본점/지점 전환 시 출고처 자동 변경
+  useEffect(() => {
+    setShipmentForm(prev => ({
+      ...prev,
+      partner: activeSite === 'hq' ? DEFAULT_OUTBOUND_PARTNER_HQ : ''
+    }));
+  }, [activeSite]);
   
   // ============ 입고 ============
   const handleIncomingSubmit = async () => {
@@ -441,19 +517,32 @@ export default function EggProductionManager() {
     
     const record = {
       id: `ship_${Date.now()}`, type: 'shipment', site: activeSite,
-      date: shipmentForm.date, partner: shipmentForm.partner || DEFAULT_OUTBOUND_PARTNER,
-      vehicle: shipmentForm.vehicle,    // 🆕 출고 차량번호
-      driver: shipmentForm.driver,      // 🆕 운전자
+      date: shipmentForm.date, partner: shipmentForm.partner || (activeSite === 'hq' ? DEFAULT_OUTBOUND_PARTNER_HQ : ''),
+      vehicle: shipmentForm.vehicle,
+      driver: shipmentForm.driver,
       items: processedItems,
       totalPans: activeSite === 'hq' ? totalPans : 0,
       totalPalletsDecimal: activeSite === 'hq' ? totalPalletsDecimal : 0,
       totalQuantity, totalBoxes,
-      note: shipmentForm.note, createdAt: new Date().toISOString()
+      note: shipmentForm.note,
+      // 🆕 진행 상태 추적 (4단계)
+      status: {
+        shipped: true,                  // 1단계: 출고 완료 (자동)
+        shippedAt: new Date().toISOString(),
+        delivered: false,               // 2단계: 납품 확정
+        deliveredDate: '',              // 납품 일자
+        ecountEntered: false,           // 3단계: 이카운트 입력
+        ecountDate: '',                 // 이카운트 입력 일자
+        reported: false,                // 4단계: 신고 완료
+        reportedDate: '',               // 신고 일자
+      },
+      createdAt: new Date().toISOString()
     };
     
     if (await saveRecord(record)) {
       setShipmentForm({
-        date: todayDate, partner: DEFAULT_OUTBOUND_PARTNER,
+        date: todayDate, 
+        partner: activeSite === 'hq' ? DEFAULT_OUTBOUND_PARTNER_HQ : '',
         vehicle: '', driver: '', sourceProductions: [],
         items: [{ specId: '', pans: '', boxes: '', quantity: '' }], note: ''
       });
@@ -605,16 +694,21 @@ export default function EggProductionManager() {
     { id: 'dashboard', label: '대시보드', icon: BarChart3 },
     { id: 'incoming', label: '원란 입고', icon: Package },
     { id: 'production', label: '생산 기록', icon: Factory },
-    { id: 'shipment', label: '출고 (모하지)', icon: Truck },
+    { id: 'shipment', label: activeSite === 'hq' ? '출고 (모하지)' : '출고 (브랜드별)', icon: Truck },
+    { id: 'reporting', label: '신고 관리', icon: ClipboardCheck },
     { id: 'history', label: '전체 기록', icon: Calendar },
   ];
   
   if (loading) {
     return (
-      <div className="min-h-screen bg-stone-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-50 flex items-center justify-center">
         <div className="text-center">
-          <RefreshCw className="w-12 h-12 text-amber-600 animate-spin mx-auto mb-4" />
-          <p className="text-stone-600 font-medium">Firebase 연결 중...</p>
+          <div className="w-16 h-16 bg-amber-500 rounded-2xl flex items-center justify-center shadow-lg mb-4 mx-auto">
+            <Egg className="w-8 h-8 text-white animate-pulse" strokeWidth={2.5} />
+          </div>
+          <RefreshCw className="w-6 h-6 text-amber-600 animate-spin mx-auto mb-2" />
+          <p className="text-stone-700 font-bold">계란 생산 관리 시스템</p>
+          <p className="text-xs text-stone-500 mt-1">데이터 불러오는 중...</p>
         </div>
       </div>
     );
@@ -744,6 +838,16 @@ export default function EggProductionManager() {
           />
         )}
         
+        {activeSite !== 'overview' && activeTab === 'reporting' && (
+          <ReportingView 
+            records={records.filter(r => r.type === 'shipment' && r.site === activeSite)}
+            site={activeSite} specLabel={specLabel}
+            onUpdateStatus={updateShipmentStatus}
+            todayDate={todayDate}
+            fmt={fmt} fmtD={fmtD}
+          />
+        )}
+        
         {activeSite !== 'overview' && activeTab === 'history' && (
           <HistoryView 
             records={records.filter(r => r.site === activeSite)}
@@ -846,7 +950,7 @@ function OverviewDashboard({ hqStats, brStats, allStats, records, specMap, getWe
           <BigStat label="총 입고" value={fmt(allStats.todayIncoming)} unit="판" />
           <BigStat label="생산" value={`${fmt(hqStats.todayPans)}판 / ${fmt(brStats.todayProduced)}개`} unit={`본점 ${fmtD(hqStats.todayPallets)}PLT · 지점 ${fmt(brStats.todayBoxes)}박스`} />
           <BigStat label="총 로스" value={fmt(allStats.todayLoss)} unit={`개 (${allStats.todayLossRate}%)`} />
-          <BigStat label="출고 (모하지)" value={`${fmtD(hqStats.todayShipPallets)}PLT / ${fmt(brStats.todayShipBoxes)}박스`} unit={`총 ${fmt(allStats.todayShipment + hqStats.todayShipPans)}개/판`} />
+          <BigStat label="출고" value={`${fmtD(hqStats.todayShipPallets)}PLT / ${fmt(brStats.todayShipBoxes)}박스`} unit={`본점:모하지 · 지점:브랜드별`} />
         </div>
       </div>
       
@@ -978,7 +1082,7 @@ function SiteDashboard({ site, stats, weeklyData, itemStats, specMap, fmt, fmtD 
           {isHq ? (
             <StatCard icon={Truck} label="출고 (모하지)" value={`${fmtD(stats.todayShipPallets)} PLT`} unit={`${fmt(stats.todayShipPans)}판`} color="amber" />
           ) : (
-            <StatCard icon={Truck} label="출고 (모하지)" value={fmt(stats.todayShipBoxes)} unit={`박스 / ${fmt(stats.todayShipment)}개`} color="amber" />
+            <StatCard icon={Truck} label="출고 (브랜드별)" value={fmt(stats.todayShipBoxes)} unit={`박스 / ${fmt(stats.todayShipment)}개`} color="amber" />
           )}
         </div>
       </div>
@@ -1502,12 +1606,61 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
 function ShipmentForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveItem, onSubmit, saving, site, hqSpecs, brProducts, specMap, todayRecords, onDelete, specLabel, onOpenManager, fmt, fmtD }) {
   const isHq = site === 'hq';
   
+  // 지점에서 브랜드 자동 추출 (제품 마스터에서)
+  const brandList = useMemo(() => {
+    return [...new Set(brProducts.map(p => p.brand))];
+  }, [brProducts]);
+  
   return (
-    <FormCard title={`출고 (3PL - 모하지) - ${isHq ? '본점' : '지점'}`} icon={Truck} color="amber">
+    <FormCard 
+      title={isHq ? '출고 (3PL - 모하지) - 본점' : '출고 (브랜드별) - 지점'} 
+      icon={Truck} color="amber"
+    >
+      {/* 본점/지점 안내 */}
+      {isHq ? (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+          🚚 <b>본점은 모하지(3PL)로 일괄 출고</b>됩니다. 출고처는 자동으로 모하지로 설정됩니다.
+        </div>
+      ) : (
+        <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
+          📦 <b>지점은 브랜드별로 직접 출고</b>됩니다. 출고처(브랜드)를 선택해주세요.
+        </div>
+      )}
+      
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Field label="출고 날짜"><input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" /></Field>
-        <Field label="출고처"><input type="text" value={form.partner} onChange={e => setForm({...form, partner: e.target.value})} className="input-field bg-amber-50 font-semibold" /></Field>
-        {/* 🆕 출고 차량번호 */}
+        
+        {/* 본점: 모하지 고정, 지점: 브랜드 선택 */}
+        {isHq ? (
+          <Field label="출고처">
+            <input type="text" value={form.partner} onChange={e => setForm({...form, partner: e.target.value})} className="input-field bg-amber-50 font-semibold" />
+          </Field>
+        ) : (
+          <Field label="출고처 (브랜드)" required>
+            <div className="flex gap-2">
+              <select 
+                value={brandList.includes(form.partner) ? form.partner : '__custom'} 
+                onChange={e => setForm({...form, partner: e.target.value === '__custom' ? '' : e.target.value})} 
+                className="input-field flex-1 bg-indigo-50 font-semibold"
+              >
+                <option value="">브랜드 선택</option>
+                {brandList.map(b => <option key={b} value={b}>{b}</option>)}
+                <option value="__custom">직접 입력</option>
+              </select>
+            </div>
+            {(!brandList.includes(form.partner) || form.partner === '') && (
+              <input 
+                type="text" 
+                value={form.partner} 
+                onChange={e => setForm({...form, partner: e.target.value})} 
+                placeholder="예: 코스트코, 이마트 등" 
+                className="input-field mt-2" 
+              />
+            )}
+          </Field>
+        )}
+        
+        {/* 출고 차량번호 */}
         <Field label="출고 차량번호 (역학조사)">
           <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="예: 12가 3456" className="input-field" />
         </Field>
@@ -1604,8 +1757,9 @@ function ShipmentForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveI
       </button>
       
       <TodayList 
-        records={todayRecords} title="오늘 출고 내역 (모하지)" onDelete={onDelete}
+        records={todayRecords} title={isHq ? '오늘 출고 내역 (모하지)' : '오늘 출고 내역 (브랜드별)'} onDelete={onDelete}
         columns={[
+          { header: '거래처', render: r => <span className="font-medium text-stone-800">{r.partner || '-'}</span> },
           { header: '차량', render: r => <span className="text-xs text-stone-600">{r.vehicle || '-'}</span> },
           { header: '품목', render: r => (
             <div className="text-xs space-y-0.5">
@@ -1617,6 +1771,22 @@ function ShipmentForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveI
               ))}
             </div>
           )},
+          { header: '진행', render: r => {
+            const s = r.status || { shipped: true };
+            const stage = s.reported ? 4 : s.ecountEntered ? 3 : s.delivered ? 2 : 1;
+            return (
+              <div className="flex items-center gap-1">
+                {[1,2,3,4].map(i => (
+                  <div key={i} className={`w-2 h-2 rounded-full ${
+                    i <= stage ? (stage === 4 ? 'bg-green-500' : 'bg-amber-500') : 'bg-stone-200'
+                  }`} title={['출고','납품','이카운트','신고'][i-1]}></div>
+                ))}
+                <span className="text-xs text-stone-500 ml-1">
+                  {stage === 4 ? '✓' : `${stage}/4`}
+                </span>
+              </div>
+            );
+          }},
           { header: '합계', align: 'right', render: r => (
             <div>
               {isHq ? <><div className="font-bold text-amber-600">{fmtD(r.totalPalletsDecimal)} 파렛</div><div className="text-xs text-stone-500">{fmt(r.totalPans)}판</div></> 
@@ -1758,7 +1928,260 @@ function TodayList({ records, title, onDelete, columns }) {
   );
 }
 
-// ============ 🆕 농장 관리 모달 ============
+// ============ 🆕 신고 관리 뷰 ============
+function ReportingView({ records, site, specLabel, onUpdateStatus, todayDate, fmt, fmtD }) {
+  const [filter, setFilter] = useState('all'); // all | shipped | delivered | ecount | reported
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  
+  const isHq = site === 'hq';
+  
+  // 상태별 분류 (status 필드 없으면 모두 출고완료 단계로 간주)
+  const getStage = (r) => {
+    const s = r.status || { shipped: true };
+    if (s.reported) return 4;        // 신고 완료
+    if (s.ecountEntered) return 3;   // 이카운트 입력
+    if (s.delivered) return 2;       // 납품 확정
+    return 1;                        // 출고만 완료
+  };
+  
+  const filtered = useMemo(() => {
+    let result = [...records];
+    
+    // 필터링
+    if (filter === 'pending_delivery') result = result.filter(r => getStage(r) === 1);
+    else if (filter === 'pending_ecount') result = result.filter(r => getStage(r) === 2);
+    else if (filter === 'pending_report') result = result.filter(r => getStage(r) === 3);
+    else if (filter === 'completed') result = result.filter(r => getStage(r) === 4);
+    
+    // 날짜 필터
+    if (dateFrom) result = result.filter(r => r.date >= dateFrom);
+    if (dateTo) result = result.filter(r => r.date <= dateTo);
+    
+    // 최신순
+    return result.sort((a,b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+  }, [records, filter, dateFrom, dateTo]);
+  
+  // 단계별 카운트
+  const counts = useMemo(() => {
+    const c = { all: records.length, stage1: 0, stage2: 0, stage3: 0, stage4: 0 };
+    records.forEach(r => {
+      const s = getStage(r);
+      if (s === 1) c.stage1++;
+      else if (s === 2) c.stage2++;
+      else if (s === 3) c.stage3++;
+      else if (s === 4) c.stage4++;
+    });
+    return c;
+  }, [records]);
+  
+  const exportFilteredCSV = () => {
+    let csv = '\uFEFF출고일,거래처,차량,운전자,수량,납품확정,납품일,이카운트,이카운트일,신고완료,신고일,비고\n';
+    filtered.forEach(r => {
+      const s = r.status || {};
+      const itemsStr = (r.items || []).map(it => `${specLabel(it.specId)} ${isHq ? `${it.pans||0}판` : `${it.boxes||0}박스`}`).join(' / ');
+      const totalStr = isHq ? `${fmt(r.totalPans)}판/${fmtD(r.totalPalletsDecimal)}PLT` : `${fmt(r.totalBoxes)}박스/${fmt(r.totalQuantity)}개`;
+      csv += `${r.date},${r.partner||''},${r.vehicle||''},${r.driver||''},${totalStr} (${itemsStr}),${s.delivered?'O':'X'},${s.deliveredDate||''},${s.ecountEntered?'O':'X'},${s.ecountDate||''},${s.reported?'O':'X'},${s.reportedDate||''},"${r.note||''}"\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `신고관리_${todayDate}.csv`;
+    a.click();
+  };
+  
+  return (
+    <div className="space-y-4">
+      {/* 단계별 안내 */}
+      <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-2xl p-5 border-2 border-purple-200">
+        <div className="flex items-center gap-2 mb-3">
+          <ClipboardCheck className="w-5 h-5 text-purple-700" />
+          <h2 className="font-bold text-purple-900">신고 관리 - {isHq ? '본점' : '지점'}</h2>
+        </div>
+        <p className="text-xs text-stone-700 mb-3">
+          출고 후 <b>4단계</b>로 진행 상태를 추적합니다. 각 단계 완료 시 체크하세요.
+        </p>
+        <div className="grid grid-cols-4 gap-2">
+          <StageCounter num={1} label="출고만 완료" count={counts.stage1} color="blue" desc="납품 대기" />
+          <StageCounter num={2} label="납품 확정" count={counts.stage2} color="cyan" desc="이카운트 대기" />
+          <StageCounter num={3} label="이카운트 입력" count={counts.stage3} color="amber" desc="신고 대기" />
+          <StageCounter num={4} label="신고 완료" count={counts.stage4} color="green" desc="끝" />
+        </div>
+      </div>
+      
+      {/* 필터 */}
+      <div className="bg-white rounded-xl border border-stone-200 p-4">
+        <div className="flex flex-wrap gap-2 mb-3">
+          <FilterBtn active={filter === 'all'} onClick={() => setFilter('all')} label={`전체 (${counts.all})`} />
+          <FilterBtn active={filter === 'pending_delivery'} onClick={() => setFilter('pending_delivery')} label={`납품 대기 (${counts.stage1})`} color="blue" />
+          <FilterBtn active={filter === 'pending_ecount'} onClick={() => setFilter('pending_ecount')} label={`이카운트 대기 (${counts.stage2})`} color="cyan" />
+          <FilterBtn active={filter === 'pending_report'} onClick={() => setFilter('pending_report')} label={`신고 대기 (${counts.stage3})`} color="amber" />
+          <FilterBtn active={filter === 'completed'} onClick={() => setFilter('completed')} label={`완료 (${counts.stage4})`} color="green" />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-stone-600">기간:</span>
+          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="input-field w-auto" />
+          <span className="text-stone-400">~</span>
+          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="input-field w-auto" />
+          <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="px-2 py-1 text-xs text-stone-500 hover:text-stone-700">초기화</button>
+          <button onClick={exportFilteredCSV} className="ml-auto flex items-center gap-2 px-3 py-2 bg-purple-50 hover:bg-purple-100 rounded-lg text-sm font-medium text-purple-700">
+            <Download className="w-4 h-4" />필터된 결과 엑셀
+          </button>
+        </div>
+      </div>
+      
+      {/* 출고 목록 */}
+      <div className="space-y-2">
+        {filtered.length === 0 ? (
+          <div className="bg-white rounded-xl border border-stone-200 p-12 text-center text-stone-400">
+            해당하는 출고 기록이 없습니다
+          </div>
+        ) : filtered.map(r => {
+          const s = r.status || { shipped: true };
+          const stage = getStage(r);
+          
+          return (
+            <div key={r.id} className="bg-white rounded-xl border border-stone-200 p-4">
+              {/* 출고 정보 */}
+              <div className="flex items-start justify-between mb-3 gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className="text-sm text-stone-500">{r.date}</span>
+                    <span className="font-bold text-stone-900">{r.partner || '-'}</span>
+                    {r.vehicle && <span className="text-xs px-2 py-0.5 bg-stone-100 rounded text-stone-600">{r.vehicle}</span>}
+                    {r.driver && <span className="text-xs text-stone-500">{r.driver}</span>}
+                  </div>
+                  <div className="text-xs text-stone-600">
+                    {(r.items || []).map((it, i) => (
+                      <span key={i} className="inline-block mr-3">
+                        {specLabel(it.specId)} <b>{isHq ? `${fmt(it.pans)}판` : `${it.boxes}박스`}</b>
+                      </span>
+                    ))}
+                  </div>
+                  {r.note && <div className="text-xs text-stone-500 mt-1">📝 {r.note}</div>}
+                </div>
+                <div className="text-right flex-shrink-0">
+                  <div className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold ${
+                    stage === 4 ? 'bg-green-100 text-green-800' :
+                    stage === 3 ? 'bg-amber-100 text-amber-800' :
+                    stage === 2 ? 'bg-cyan-100 text-cyan-800' :
+                    'bg-blue-100 text-blue-800'
+                  }`}>
+                    {stage === 4 ? '✓ 완료' :
+                     stage === 3 ? '신고 대기' :
+                     stage === 2 ? '이카운트 대기' :
+                     '납품 대기'}
+                  </div>
+                  <div className="text-sm font-bold text-stone-900 mt-1">
+                    {isHq ? <>{fmtD(r.totalPalletsDecimal)} PLT</> : <>{fmt(r.totalBoxes)} 박스</>}
+                  </div>
+                </div>
+              </div>
+              
+              {/* 4단계 진행 표시 */}
+              <div className="flex items-stretch gap-1 bg-stone-50 rounded-lg p-2">
+                <StageItem 
+                  num={1} label="출고" 
+                  done={true} date={r.date}
+                  disabled
+                />
+                <StageItem 
+                  num={2} label="납품 확정" 
+                  done={s.delivered} date={s.deliveredDate}
+                  onClick={() => onUpdateStatus(r, 'delivered', !s.delivered)}
+                  onDateChange={(d) => onUpdateStatus(r, 'delivered', s.delivered, d)}
+                />
+                <StageItem 
+                  num={3} label="이카운트" 
+                  done={s.ecountEntered} date={s.ecountDate}
+                  onClick={() => onUpdateStatus(r, 'ecountEntered', !s.ecountEntered)}
+                  onDateChange={(d) => onUpdateStatus(r, 'ecountEntered', s.ecountEntered, d)}
+                  disabled={!s.delivered}
+                />
+                <StageItem 
+                  num={4} label="신고" 
+                  done={s.reported} date={s.reportedDate}
+                  onClick={() => onUpdateStatus(r, 'reported', !s.reported)}
+                  onDateChange={(d) => onUpdateStatus(r, 'reported', s.reported, d)}
+                  disabled={!s.ecountEntered}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StageCounter({ num, label, count, color, desc }) {
+  const colorMap = {
+    blue: 'bg-blue-100 text-blue-800 border-blue-300',
+    cyan: 'bg-cyan-100 text-cyan-800 border-cyan-300',
+    amber: 'bg-amber-100 text-amber-800 border-amber-300',
+    green: 'bg-green-100 text-green-800 border-green-300',
+  };
+  return (
+    <div className={`p-3 rounded-lg border-2 ${colorMap[color]}`}>
+      <div className="text-xs opacity-70 mb-0.5">{num}단계 - {label}</div>
+      <div className="text-2xl font-bold">{count}</div>
+      <div className="text-xs opacity-60">건 · {desc}</div>
+    </div>
+  );
+}
+
+function FilterBtn({ active, onClick, label, color = 'stone' }) {
+  const colors = {
+    stone: active ? 'bg-stone-700 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+    blue: active ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-700 hover:bg-blue-100',
+    cyan: active ? 'bg-cyan-600 text-white' : 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100',
+    amber: active ? 'bg-amber-600 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100',
+    green: active ? 'bg-green-600 text-white' : 'bg-green-50 text-green-700 hover:bg-green-100',
+  };
+  return (
+    <button onClick={onClick} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition ${colors[color]}`}>
+      {label}
+    </button>
+  );
+}
+
+function StageItem({ num, label, done, date, onClick, onDateChange, disabled }) {
+  return (
+    <div className={`flex-1 rounded-md p-2 transition ${
+      done ? 'bg-green-50 border border-green-200' : 
+      disabled ? 'bg-stone-100 opacity-50' :
+      'bg-white border border-stone-200 hover:border-amber-400'
+    }`}>
+      <div className="flex items-center gap-1 mb-1">
+        {disabled && !done ? (
+          <Circle className="w-4 h-4 text-stone-300" />
+        ) : (
+          <button onClick={onClick} disabled={disabled} className={`${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:scale-110 transition'}`}>
+            {done ? <CheckCircle2 className="w-4 h-4 text-green-600" /> : <Circle className="w-4 h-4 text-stone-400" />}
+          </button>
+        )}
+        <span className={`text-xs font-bold ${done ? 'text-green-800' : 'text-stone-700'}`}>{num}. {label}</span>
+      </div>
+      {done && (
+        <input 
+          type="date" 
+          value={date || ''} 
+          onChange={e => onDateChange && onDateChange(e.target.value)}
+          className="w-full text-xs px-1 py-0.5 bg-white border border-stone-200 rounded"
+        />
+      )}
+      {!done && !disabled && (
+        <div className="text-xs text-stone-400">대기 중</div>
+      )}
+      {disabled && !done && (
+        <div className="text-xs text-stone-400">이전 단계 후</div>
+      )}
+    </div>
+  );
+}
+
+// ============ 농장 관리 모달 ============
 function FarmManager({ farms, onSave, onClose }) {
   const [newFarm, setNewFarm] = useState({ name: '', regNo: '', farmCode: '', owner: '', phone: '', address: '' });
   
