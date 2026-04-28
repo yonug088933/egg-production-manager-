@@ -12,13 +12,12 @@ import {
 
 // ============ Firebase 설정 (선별포장) ============
 const firebaseConfig = {
-  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
-  authDomain: "egg-production-manager.firebaseapp.com",
-  projectId: "egg-production-manager",
-  storageBucket: "egg-production-manager.firebasestorage.app",
-  messagingSenderId: "891063225076",
-  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
-  measurementId: "G-4BQTZ8YFRJ"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 const app = initializeApp(firebaseConfig);
@@ -770,7 +769,28 @@ export default function EggProductionManager() {
   
   const hqStats = useMemo(() => getStatsForSite('hq'), [records, todayDate]);
   const brStats = useMemo(() => getStatsForSite('branch'), [records, todayDate]);
-  const allStats = useMemo(() => getStatsForSite('all'), [records, todayDate]);
+  const allStats = useMemo(() => {
+    const base = getStatsForSite('all');
+    
+    // 이번 달 통계 추가
+    const month = todayDate.slice(0, 7); // YYYY-MM
+    const monthRecs = records.filter(r => r.date && r.date.startsWith(month));
+    const monthIncoming = monthRecs.filter(r => r.type === 'incoming').reduce((s, r) => s + (r.quantity || 0), 0);
+    const monthProductionCount = monthRecs.filter(r => r.type === 'production').length;
+    const monthShipmentCount = monthRecs.filter(r => r.type === 'shipment').length;
+    const monthProds = monthRecs.filter(r => r.type === 'production');
+    const monthLoss = monthProds.reduce((s, r) => s + (r.loss || 0), 0);
+    const monthProduced = monthProds.reduce((s, r) => s + (r.totalQuantity || r.totalPans * 30 || 0), 0);
+    const avgLossRate = monthProduced > 0 ? ((monthLoss / monthProduced) * 100).toFixed(2) : '0';
+    
+    return {
+      ...base,
+      monthlyIncoming: monthIncoming,
+      monthlyProduction: monthProductionCount,
+      monthlyShipment: monthShipmentCount,
+      avgLossRate: avgLossRate
+    };
+  }, [records, todayDate]);
   const currentStats = activeSite === 'hq' ? hqStats : activeSite === 'branch' ? brStats : allStats;
   
   const getWeeklyData = (site) => {
@@ -1189,6 +1209,38 @@ function OverviewDashboard({ hqStats, brStats, allStats, records, specMap, getWe
         <SiteCard icon={Store} title="지점 (제품)" color="indigo" stats={brStats} fmt={fmt} fmtD={fmtD} siteType="branch" />
       </div>
       
+      {/* 🆕 빠른 통계 행 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
+        <QuickStat 
+          icon={Calendar} 
+          label="이번 달 누적" 
+          value={`${fmt(allStats.monthlyIncoming || 0)}판`} 
+          sub="입고" 
+          color="blue" 
+        />
+        <QuickStat 
+          icon={Factory} 
+          label="이번 달 생산" 
+          value={`${fmt(allStats.monthlyProduction || 0)}`} 
+          sub="회" 
+          color="green" 
+        />
+        <QuickStat 
+          icon={AlertCircle} 
+          label="평균 로스율" 
+          value={`${allStats.avgLossRate || '0'}%`} 
+          sub="이번 달" 
+          color="red" 
+        />
+        <QuickStat 
+          icon={Truck} 
+          label="이번 달 출고" 
+          value={`${fmt(allStats.monthlyShipment || 0)}`} 
+          sub="회" 
+          color="amber" 
+        />
+      </div>
+      
       {/* 🆕 최근 7일 입고 농장 현황 */}
       {recentFarms.length > 0 && (
         <div className="bg-white rounded-xl p-5 border border-stone-200">
@@ -1453,6 +1505,24 @@ function InfoCard({ icon: Icon, label, value, sub }) {
       </div>
       <div className="text-base md:text-xl font-bold text-stone-900 break-words">{value}</div>
       <div className="text-[10px] md:text-xs text-stone-500 mt-0.5">{sub}</div>
+    </div>
+  );
+}
+
+function QuickStat({ icon: Icon, label, value, sub, color }) {
+  const colors = {
+    blue: 'bg-blue-50 text-blue-700 border-blue-200',
+    green: 'bg-green-50 text-green-700 border-green-200',
+    red: 'bg-red-50 text-red-700 border-red-200',
+    amber: 'bg-amber-50 text-amber-700 border-amber-200',
+  };
+  return (
+    <div className={`p-2.5 md:p-3 rounded-xl border ${colors[color]}`}>
+      <div className="flex items-center gap-1.5 mb-1 opacity-80 text-[10px] md:text-xs">
+        <Icon className="w-3.5 h-3.5" />{label}
+      </div>
+      <div className="text-base md:text-xl font-bold leading-tight">{value}</div>
+      <div className="text-[10px] md:text-xs opacity-70 mt-0.5">{sub}</div>
     </div>
   );
 }
@@ -1909,68 +1979,106 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
   
   return (
     <FormCard title={`생산 기록 - ${isHq ? '본점' : '지점'}`} icon={Factory} color="green">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Field label="날짜"><input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" /></Field>
-        <Field label="작업자"><input type="text" value={form.worker} onChange={e => setForm({...form, worker: e.target.value})} placeholder="선택" className="input-field" /></Field>
-        <Field label="시작" required><input type="time" value={form.startTime} onChange={e => setForm({...form, startTime: e.target.value})} className="input-field" /></Field>
-        <Field label="종료" required><input type="time" value={form.endTime} onChange={e => setForm({...form, endTime: e.target.value})} className="input-field" /></Field>
+      
+      {/* 1. 작업 정보 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-green-100 text-green-700 rounded-full text-xs flex items-center justify-center font-bold">1</span>
+          작업 정보
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
+          <Field label="날짜">
+            <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
+          </Field>
+          <Field label="작업자">
+            <input type="text" value={form.worker} onChange={e => setForm({...form, worker: e.target.value})} placeholder="선택" className="input-field" />
+          </Field>
+          <Field label="시작" required>
+            <input type="time" value={form.startTime} onChange={e => setForm({...form, startTime: e.target.value})} className="input-field" />
+          </Field>
+          <Field label="종료" required>
+            <input type="time" value={form.endTime} onChange={e => setForm({...form, endTime: e.target.value})} className="input-field" />
+          </Field>
+        </div>
       </div>
       
-      {/* 🆕 사용 Lot 선택 */}
-      <div className="mt-5 p-4 bg-amber-50 border-2 border-amber-300 rounded-xl">
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-bold text-amber-900 flex items-center gap-2">
-            <Hash className="w-4 h-4" />이 작업에 사용한 원란 Lot 선택 (역학조사용)
-          </label>
-          <span className="text-xs text-amber-700">{form.sourceLots.length}개 선택됨</span>
-        </div>
-        <div className="text-xs text-amber-700 mb-3">
-          ⚠️ Lot을 선택하지 않으면 추후 역학조사가 어렵습니다. 가능한 한 정확히 선택해주세요.
-        </div>
+      {/* 2. 사용 Lot 선택 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-green-100 text-green-700 rounded-full text-xs flex items-center justify-center font-bold">2</span>
+          사용 원란 Lot 
+          <span className="text-xs font-normal text-stone-500">(역학조사용)</span>
+          <span className="ml-auto">
+            {form.sourceLots.length > 0 ? (
+              <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-bold">{form.sourceLots.length}개 선택됨</span>
+            ) : (
+              <span className="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-bold">⚠️ 미선택</span>
+            )}
+          </span>
+        </h3>
         
-        {recentLots.length === 0 ? (
-          <div className="text-center py-4 text-stone-500 text-sm">최근 30일 입고 내역이 없습니다</div>
-        ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1.5">
-            {recentLots.map(lot => {
-              const selected = form.sourceLots.includes(lot.lotNo);
-              return (
-                <label key={lot.id} className={`flex items-start gap-3 p-2.5 rounded-lg cursor-pointer transition ${
-                  selected ? 'bg-amber-200 border-2 border-amber-500' : 'bg-white border border-stone-200 hover:border-amber-400'
-                }`}>
-                  <input type="checkbox" checked={selected} onChange={() => onToggleLot(lot.lotNo)} className="w-4 h-4 mt-1" />
-                  <div className="flex-1">
-                    <div className="grid grid-cols-12 gap-2 items-center text-sm">
-                      <span className="col-span-3 font-mono font-bold text-amber-700">{lot.lotNo}</span>
-                      <span className="col-span-2 text-stone-500 text-xs">{lot.date}</span>
-                      <span className="col-span-3 font-medium text-stone-800">{lot.farmName || lot.supplier}</span>
-                      <span className="col-span-2 text-stone-600 text-xs font-mono">{lot.eggMark || '-'}</span>
-                      <span className="col-span-2 text-right font-bold text-stone-900">{fmt(lot.quantity)}판</span>
-                    </div>
-                    {lot.gradeQuantities && Object.keys(lot.gradeQuantities).length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1.5 text-xs">
-                        {Object.entries(lot.gradeQuantities).map(([g, q]) => (
-                          <span key={g} className="px-1.5 py-0.5 bg-stone-100 text-stone-700 rounded">
-                            {g}란 {fmt(q)}판
-                          </span>
-                        ))}
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
+          {recentLots.length === 0 ? (
+            <div className="text-center py-6 text-stone-500 text-sm">
+              📭 최근 30일 입고 내역이 없습니다
+            </div>
+          ) : (
+            <>
+              <div className="text-xs text-amber-800 mb-2">
+                💡 이 작업에 사용한 원란 Lot을 모두 선택하세요. 정확한 역학조사를 위해 중요해요!
+              </div>
+              <div className="max-h-56 overflow-y-auto space-y-1.5">
+                {recentLots.map(lot => {
+                  const selected = form.sourceLots.includes(lot.lotNo);
+                  return (
+                    <label key={lot.id} className={`block p-3 rounded-lg cursor-pointer transition ${
+                      selected 
+                        ? 'bg-green-100 border-2 border-green-500 shadow-sm' 
+                        : 'bg-white border border-stone-200 hover:border-amber-400 hover:bg-amber-50/50'
+                    }`}>
+                      <div className="flex items-start gap-2">
+                        <input type="checkbox" checked={selected} onChange={() => onToggleLot(lot.lotNo)} 
+                          className="w-5 h-5 mt-0.5 flex-shrink-0 cursor-pointer" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap mb-1">
+                            <span className="font-mono font-bold text-sm text-amber-700">{lot.lotNo}</span>
+                            <span className="text-xs text-stone-500">{lot.date}</span>
+                            <span className="font-medium text-stone-800 text-sm">{lot.farmName || lot.supplier}</span>
+                            {lot.eggMark && (
+                              <span className="text-xs font-mono text-stone-600 px-1.5 py-0.5 bg-stone-100 rounded">{lot.eggMark}</span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex flex-wrap gap-1 text-xs">
+                              {lot.gradeQuantities && Object.entries(lot.gradeQuantities).map(([g, q]) => (
+                                <span key={g} className="px-1.5 py-0.5 bg-stone-100 text-stone-700 rounded">
+                                  <b>{g}란</b> {fmt(q)}판
+                                </span>
+                              ))}
+                            </div>
+                            <span className="text-sm font-bold text-stone-900">{fmt(lot.quantity)}판</span>
+                          </div>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </label>
-              );
-            })}
-          </div>
-        )}
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
       </div>
       
-      <div className="mt-5">
-        <div className="flex items-center justify-between mb-3">
-          <label className="text-sm font-semibold text-stone-700">{isHq ? '규격별 생산량 (판수→파렛 자동)' : '제품별 생산량'}</label>
-          <button onClick={onOpenManager} className="text-xs text-amber-700 hover:text-amber-800 font-medium flex items-center gap-1">
+      {/* 3. 생산 항목 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-green-100 text-green-700 rounded-full text-xs flex items-center justify-center font-bold">3</span>
+          {isHq ? '규격별 생산량' : '제품별 생산량'} 
+          <span className="text-red-500">*</span>
+          <button onClick={onOpenManager} className="ml-auto text-xs text-amber-700 hover:text-amber-800 font-medium flex items-center gap-1">
             <Settings className="w-3 h-3" />목록 관리
           </button>
-        </div>
+        </h3>
         
         <div className="space-y-2">
           {items.map((item, idx) => {
@@ -2005,11 +2113,11 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
                     <>
                       <div className="col-span-6 md:col-span-3">
                         <label className="text-xs text-stone-500 mb-1 block">판수</label>
-                        <input type="number" value={item.pans} onChange={e => onUpdateItem(idx, 'pans', e.target.value)} placeholder="0" className="input-field text-lg font-semibold" inputMode="numeric" />
+                        <input type="number" value={item.pans} onChange={e => onUpdateItem(idx, 'pans', e.target.value)} placeholder="0" className="input-field text-base font-semibold" inputMode="numeric" />
                       </div>
                       <div className="col-span-5 md:col-span-3">
-                        <label className="text-xs text-stone-500 mb-1 block">파렛 <span className="text-amber-600">(자동)</span></label>
-                        <div className="input-field bg-amber-50 font-bold text-amber-900 flex items-center">
+                        <label className="text-xs text-stone-500 mb-1 block">파렛 <span className="text-amber-600">자동</span></label>
+                        <div className="input-field bg-amber-50 font-bold text-amber-900 flex items-center text-sm">
                           {palletCalc ? <span>{fmtD(palletCalc.decimal)} PLT</span> : <span className="text-stone-400">-</span>}
                         </div>
                       </div>
@@ -2021,76 +2129,72 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
                         <input type="number" value={item.boxes} onChange={e => onUpdateItem(idx, 'boxes', e.target.value)} placeholder="0" className="input-field font-semibold" inputMode="numeric" />
                       </div>
                       <div className="col-span-5 md:col-span-3">
-                        <label className="text-xs text-stone-500 mb-1 block">개수 {qtyCalc !== null && <span className="text-amber-600">(자동:{fmt(qtyCalc)})</span>}</label>
-                        <input type="number" value={item.quantity} onChange={e => onUpdateItem(idx, 'quantity', e.target.value)} placeholder={qtyCalc !== null ? fmt(qtyCalc) : '0'} className="input-field font-semibold" inputMode="numeric" />
+                        <label className="text-xs text-stone-500 mb-1 block">개수 <span className="text-amber-600">자동</span></label>
+                        <div className="input-field bg-amber-50 font-bold text-amber-900 flex items-center text-sm">
+                          {qtyCalc ? <span>{fmt(qtyCalc)}개</span> : <span className="text-stone-400">-</span>}
+                        </div>
                       </div>
                     </>
                   )}
                   
-                  <div className="col-span-1">
+                  <div className="col-span-1 flex justify-end">
                     {items.length > 1 && (
-                      <button onClick={() => onRemoveItem(idx)} className="w-full p-2.5 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded-lg">
-                        <X className="w-4 h-4 mx-auto" />
+                      <button onClick={() => onRemoveItem(idx)} className="p-2 text-stone-400 hover:text-red-500">
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     )}
                   </div>
                 </div>
-                
-                {isHq && palletCalc && item.pans && (
-                  <div className="mt-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1 inline-block">
-                    💡 {item.pans}판 ÷ {spec?.panPerPallet}판/PLT = <b>{palletCalc.pallets}PLT + {palletCalc.remainder}판</b>
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
         
-        <button onClick={onAddItem} className="mt-2 w-full py-2.5 border-2 border-dashed border-stone-300 hover:border-amber-400 hover:bg-amber-50 rounded-xl text-sm font-medium text-stone-500 hover:text-amber-700 transition flex items-center justify-center gap-2">
+        <button onClick={onAddItem} className="w-full mt-2 py-2 border-2 border-dashed border-stone-300 hover:border-green-500 hover:bg-green-50/50 text-stone-600 hover:text-green-700 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition">
           <Plus className="w-4 h-4" />{isHq ? '규격' : '제품'} 추가
         </button>
       </div>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
-        <Field label="로스 수량 (개)">
-          <input type="number" value={form.loss} onChange={e => setForm({...form, loss: e.target.value})} placeholder="0" className="input-field text-lg font-semibold" inputMode="numeric" />
-        </Field>
-        <Field label="비고">
-          <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택" className="input-field" />
-        </Field>
+      {/* 4. 로스 / 비고 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-green-100 text-green-700 rounded-full text-xs flex items-center justify-center font-bold">4</span>
+          로스 / 비고 <span className="text-xs font-normal text-stone-500">(선택)</span>
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="로스 수량 (개)">
+            <input type="number" value={form.loss} onChange={e => setForm({...form, loss: e.target.value})} placeholder="0" className="input-field text-base font-semibold" inputMode="numeric" />
+          </Field>
+          <Field label="비고">
+            <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택" className="input-field" />
+          </Field>
+        </div>
       </div>
       
-      {/* 🆕 부자재 사용량 자동 계산 표시 */}
+      {/* 부자재 사용량 자동 계산 표시 */}
       {materialUsage.length > 0 && (
-        <div className="mt-5 p-4 bg-purple-50 border-2 border-purple-300 rounded-xl">
-          <div className="flex items-center justify-between mb-3">
+        <div className="mb-4 p-4 bg-purple-50 border-2 border-purple-300 rounded-xl">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <Boxes className="w-5 h-5 text-purple-700" />
-              <h3 className="font-bold text-purple-900">이 생산에 필요한 부자재</h3>
+              <h3 className="font-bold text-purple-900 text-sm md:text-base">필요 부자재</h3>
               {inventoryConnected && (
-                <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full flex items-center gap-1">
-                  <Link2 className="w-3 h-3" />자연재고관리 연결됨
+                <span className="text-[10px] md:text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full flex items-center gap-1">
+                  <Link2 className="w-3 h-3" />연결됨
                 </span>
               )}
             </div>
-            <div className="flex gap-2 flex-wrap">
-              <button onClick={copyToClipboard} className="px-3 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1">
+            <div className="flex gap-1.5 flex-wrap">
+              <button onClick={copyToClipboard} className="px-2.5 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1">
                 📋 복사
               </button>
-              <a 
-                href="https://jayeon-inventory3.netlify.app/" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="px-3 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1"
-              >
-                자연 재고관리 열기 →
+              <a href="https://jayeon-inventory3.netlify.app/" target="_blank" rel="noopener noreferrer"
+                className="px-2.5 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1">
+                사이트 열기 →
               </a>
               {inventoryConnected && (
-                <button 
-                  onClick={handleAutoShipToInventory} 
-                  disabled={sendingToInventory}
-                  className="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-md"
-                >
+                <button onClick={handleAutoShipToInventory} disabled={sendingToInventory}
+                  className="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-md">
                   {sendingToInventory ? (
                     <><RefreshCw className="w-3 h-3 animate-spin" />출고 중...</>
                   ) : (
@@ -2110,15 +2214,15 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
                 <div key={u.inventoryItemId} className={`bg-white rounded-lg p-2.5 border ${
                   isInsufficient ? 'border-red-300 bg-red-50' : 'border-purple-200'
                 }`}>
-                  <div className="text-xs text-stone-500 mb-0.5">
+                  <div className="text-[10px] md:text-xs text-stone-500 mb-0.5">
                     {u.branch === 'main' ? '🏢 본점' : '🏪 지점'} · {u.cat === 'sub' ? '부자재' : '공통'}
                   </div>
-                  <div className="text-sm font-bold text-stone-900">{u.name}</div>
-                  <div className={`text-xl font-bold mt-1 ${isInsufficient ? 'text-red-700' : 'text-purple-700'}`}>
-                    -{fmt(u.total)} <span className="text-sm font-normal">{u.unit}</span>
+                  <div className="text-sm font-bold text-stone-900 truncate">{u.name}</div>
+                  <div className={`text-lg md:text-xl font-bold mt-1 ${isInsufficient ? 'text-red-700' : 'text-purple-700'}`}>
+                    -{fmt(u.total)} <span className="text-xs md:text-sm font-normal">{u.unit}</span>
                   </div>
                   {inventoryConnected && (
-                    <div className="text-xs text-stone-500 mt-1">
+                    <div className="text-[10px] md:text-xs text-stone-500 mt-1">
                       재고: {fmt(stock)} → <b className={isInsufficient ? 'text-red-600' : 'text-stone-700'}>{fmt(willBe)}</b>
                       {isInsufficient && <span className="ml-1 text-red-600">⚠️</span>}
                     </div>
@@ -2127,28 +2231,22 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
               );
             })}
           </div>
-          
-          <div className="mt-3 p-2 bg-white/50 rounded text-xs text-purple-700">
-            {inventoryConnected ? (
-              <>💡 <b>[🚀 자동 출고]</b> 버튼을 누르면 자연 재고관리에 자동으로 출고 등록됩니다. 또는 [📋 복사] 후 수동 입력 가능.</>
-            ) : (
-              <>⚠️ 자연 재고관리에 연결되지 않아 자동 출고 사용 불가. [📋 복사] 후 자연 재고관리 사이트에 직접 입력하세요.</>
-            )}
-          </div>
         </div>
       )}
       
-      {/* 부자재 매핑 안내 (매핑 없을 때) */}
+      {/* 부자재 매핑 안내 */}
       {items.some(it => it.specId) && materialUsage.length === 0 && (
-        <div className="mt-5 p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-800">
-          ℹ️ 이 제품은 부자재 매핑이 등록되지 않았습니다. <b>부자재 탭 → 매핑 설정</b>에서 자연 재고관리 부자재와 연결해주세요.
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs md:text-sm text-amber-800 flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>이 제품은 부자재 매핑이 등록되지 않았습니다. <b>부자재 탭 → 매핑 설정</b>에서 등록해주세요.</span>
         </div>
       )}
       
-      <button onClick={onSubmit} disabled={saving} className="w-full mt-5 py-3.5 bg-green-600 hover:bg-green-700 disabled:bg-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
+      {/* 등록 버튼 */}
+      <button onClick={onSubmit} disabled={saving} 
+        className="w-full py-4 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 disabled:from-stone-300 disabled:to-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-md text-base">
         <Plus className="w-5 h-5" />{saving ? '저장 중...' : '생산 기록 등록'}
       </button>
-      
       <TodayList 
         records={todayRecords} title="오늘 생산 내역" onDelete={onDelete}
         columns={[
@@ -2285,65 +2383,78 @@ function ShipmentForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveI
   
   return (
     <FormCard 
-      title={isHq ? '출고 (3PL - 모하지) - 본점' : '출고 (브랜드별) - 지점'} 
+      title={isHq ? '출고 - 본점 (모하지)' : '출고 - 지점 (브랜드별)'} 
       icon={Truck} color="amber"
     >
-      {/* 본점/지점 안내 */}
-      {isHq ? (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-          🚚 <b>본점은 모하지(3PL)로 일괄 출고</b>됩니다. 출고처는 자동으로 모하지로 설정됩니다.
+      {/* 안내 */}
+      <div className={`mb-4 p-3 rounded-xl flex items-start gap-2 ${
+        isHq ? 'bg-amber-50 border border-amber-200' : 'bg-indigo-50 border border-indigo-200'
+      }`}>
+        <Truck className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isHq ? 'text-amber-600' : 'text-indigo-600'}`} />
+        <div className={`text-xs ${isHq ? 'text-amber-800' : 'text-indigo-800'}`}>
+          {isHq ? (
+            <><b>본점은 모하지(3PL)로 일괄 출고</b>됩니다. 출고처가 자동으로 설정됩니다.</>
+          ) : (
+            <><b>지점은 브랜드별로 직접 출고</b>됩니다. 출고처(브랜드)를 선택해주세요.</>
+          )}
         </div>
-      ) : (
-        <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
-          📦 <b>지점은 브랜드별로 직접 출고</b>됩니다. 출고처(브랜드)를 선택해주세요.
-        </div>
-      )}
+      </div>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="출고 날짜"><input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" /></Field>
-        
-        {/* 본점: 모하지 고정, 지점: 브랜드 선택 */}
-        {isHq ? (
-          <Field label="출고처">
-            <input type="text" value={form.partner} onChange={e => setForm({...form, partner: e.target.value})} className="input-field bg-amber-50 font-semibold" />
+      {/* 1. 출고 정보 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-amber-100 text-amber-700 rounded-full text-xs flex items-center justify-center font-bold">1</span>
+          출고 정보
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="출고 날짜">
+            <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
           </Field>
-        ) : (
-          <Field label="출고처 (브랜드)" required>
-            <div className="flex gap-2">
+          
+          {isHq ? (
+            <Field label="출고처">
+              <input type="text" value={form.partner} onChange={e => setForm({...form, partner: e.target.value})} className="input-field bg-amber-50 font-semibold" />
+            </Field>
+          ) : (
+            <Field label="출고처 (브랜드)" required>
               <select 
-                value={brandList.includes(form.partner) ? form.partner : '__custom'} 
+                value={brandList.includes(form.partner) ? form.partner : (form.partner ? '__custom' : '')} 
                 onChange={e => setForm({...form, partner: e.target.value === '__custom' ? '' : e.target.value})} 
-                className="input-field flex-1 bg-indigo-50 font-semibold"
+                className="input-field bg-indigo-50 font-semibold"
               >
                 <option value="">브랜드 선택</option>
                 {brandList.map(b => <option key={b} value={b}>{b}</option>)}
-                <option value="__custom">직접 입력</option>
+                <option value="__custom">✏️ 직접 입력</option>
               </select>
-            </div>
-            {(!brandList.includes(form.partner) || form.partner === '') && (
-              <input 
-                type="text" 
-                value={form.partner} 
-                onChange={e => setForm({...form, partner: e.target.value})} 
-                placeholder="예: 코스트코, 이마트 등" 
-                className="input-field mt-2" 
-              />
-            )}
+              {!brandList.includes(form.partner) && (
+                <input 
+                  type="text" 
+                  value={form.partner} 
+                  onChange={e => setForm({...form, partner: e.target.value})} 
+                  placeholder="예: 코스트코, 이마트 등" 
+                  className="input-field mt-2" 
+                />
+              )}
+            </Field>
+          )}
+          
+          <Field label="출고 차량번호 (선택)">
+            <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="모르면 빈칸" className="input-field" />
           </Field>
-        )}
-        
-        {/* 출고 차량번호 */}
-        <Field label="출고 차량번호 (역학조사)">
-          <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="예: 12가 3456" className="input-field" />
-        </Field>
-        <Field label="운전자/담당자">
-          <input type="text" value={form.driver} onChange={e => setForm({...form, driver: e.target.value})} placeholder="선택" className="input-field" />
-        </Field>
+          <Field label="운전자/담당자 (선택)">
+            <input type="text" value={form.driver} onChange={e => setForm({...form, driver: e.target.value})} placeholder="선택" className="input-field" />
+          </Field>
+        </div>
       </div>
       
-      <div className="mt-5">
-        <div className="flex items-center justify-between mb-3">
-          <label className="text-sm font-semibold text-stone-700">{isHq ? '출고 규격 (판수→파렛 자동)' : '출고 제품 (박스→개수 자동)'}</label>
+      {/* 2. 출고 품목 */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-bold text-stone-700 flex items-center gap-2">
+            <span className="w-5 h-5 bg-amber-100 text-amber-700 rounded-full text-xs flex items-center justify-center font-bold">2</span>
+            {isHq ? '출고 규격 (판수→파렛 자동)' : '출고 제품 (박스→개수 자동)'}
+            <span className="text-red-500">*</span>
+          </h3>
           <button onClick={onOpenManager} className="text-xs text-amber-700 hover:text-amber-800 font-medium flex items-center gap-1">
             <Settings className="w-3 h-3" />관리
           </button>
@@ -2473,16 +2584,99 @@ function ShipmentForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveI
 
 function HistoryView({ records, site, specLabel, onDelete, onExport, fmt, fmtD }) {
   const isHq = site === 'hq';
+  const [filter, setFilter] = useState('all'); // all, incoming, production, shipment
+  const [search, setSearch] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  
+  const filtered = useMemo(() => {
+    let result = [...records];
+    
+    // 타입 필터
+    if (filter !== 'all') result = result.filter(r => r.type === filter);
+    
+    // 검색
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter(r => {
+        const text = [
+          r.farmName, r.supplier, r.lotNo, r.eggMark, r.vehicle,
+          r.partner, r.driver, r.note, r.specialNotes,
+          ...(r.items || []).map(it => specLabel(it.specId))
+        ].filter(Boolean).join(' ').toLowerCase();
+        return text.includes(q);
+      });
+    }
+    
+    // 날짜 필터
+    if (dateFrom) result = result.filter(r => r.date >= dateFrom);
+    if (dateTo) result = result.filter(r => r.date <= dateTo);
+    
+    return result.sort((a,b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+  }, [records, filter, search, dateFrom, dateTo]);
+  
+  const counts = useMemo(() => ({
+    all: records.length,
+    incoming: records.filter(r => r.type === 'incoming').length,
+    production: records.filter(r => r.type === 'production').length,
+    shipment: records.filter(r => r.type === 'shipment').length,
+  }), [records]);
+  
   return (
     <div className="bg-white rounded-xl border border-stone-200 overflow-hidden">
-      <div className="p-4 border-b border-stone-200 flex items-center justify-between">
-        <h2 className="font-bold text-stone-900 flex items-center gap-2">
-          <Calendar className="w-5 h-5 text-amber-600" />{isHq ? '본점' : '지점'} 전체 기록
-        </h2>
-        <button onClick={onExport} className="flex items-center gap-2 px-3 py-2 bg-amber-50 hover:bg-amber-100 rounded-lg text-sm font-medium text-amber-700">
-          <Download className="w-4 h-4" />엑셀
-        </button>
+      <div className="p-3 md:p-4 border-b border-stone-200">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-bold text-stone-900 flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-amber-600" />{isHq ? '본점' : '지점'} 전체 기록
+            <span className="text-xs font-normal text-stone-500">({fmt(filtered.length)}건)</span>
+          </h2>
+          <button onClick={onExport} className="flex items-center gap-2 px-3 py-2 bg-amber-50 hover:bg-amber-100 rounded-lg text-xs md:text-sm font-medium text-amber-700">
+            <Download className="w-4 h-4" />엑셀
+          </button>
+        </div>
+        
+        {/* 검색 */}
+        <div className="relative mb-3">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+          <input 
+            type="text" 
+            value={search} 
+            onChange={e => setSearch(e.target.value)}
+            placeholder="농장명, Lot, 거래처, 차량번호, 메모 검색..." 
+            className="w-full pl-10 pr-3 py-2.5 border-1.5 border-stone-200 rounded-lg text-sm focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" 
+          />
+        </div>
+        
+        {/* 타입 필터 */}
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          <button onClick={() => setFilter('all')} className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition ${
+            filter === 'all' ? 'bg-stone-700 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+          }`}>전체 ({counts.all})</button>
+          <button onClick={() => setFilter('incoming')} className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition ${
+            filter === 'incoming' ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+          }`}>📦 입고 ({counts.incoming})</button>
+          <button onClick={() => setFilter('production')} className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition ${
+            filter === 'production' ? 'bg-green-600 text-white' : 'bg-green-50 text-green-700 hover:bg-green-100'
+          }`}>🏭 생산 ({counts.production})</button>
+          <button onClick={() => setFilter('shipment')} className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition ${
+            filter === 'shipment' ? 'bg-amber-600 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+          }`}>🚛 출고 ({counts.shipment})</button>
+        </div>
+        
+        {/* 날짜 필터 */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-stone-500 font-medium">기간:</span>
+          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="px-2 py-1 border border-stone-200 rounded text-xs" />
+          <span className="text-stone-400">~</span>
+          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="px-2 py-1 border border-stone-200 rounded text-xs" />
+          {(dateFrom || dateTo) && (
+            <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="px-2 py-1 text-stone-500 hover:text-stone-700">
+              초기화
+            </button>
+          )}
+        </div>
       </div>
+      
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead className="bg-stone-50 text-xs text-stone-600 uppercase">
@@ -2495,26 +2689,37 @@ function HistoryView({ records, site, specLabel, onDelete, onExport, fmt, fmtD }
             </tr>
           </thead>
           <tbody>
-            {[...records].sort((a,b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)).map(r => (
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="py-12 text-center text-stone-400">
+                  {records.length === 0 ? '아직 기록이 없습니다' : '검색 조건에 맞는 기록이 없습니다'}
+                </td>
+              </tr>
+            ) : filtered.map(r => (
               <tr key={r.id} className="border-t border-stone-100 hover:bg-stone-50">
-                <td className="py-3 px-3 text-sm text-stone-700">{r.date}</td>
+                <td className="py-3 px-3 text-sm text-stone-700 whitespace-nowrap">{r.date}</td>
                 <td className="py-3 px-3">
-                  {r.type === 'incoming' && <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded">입고</span>}
-                  {r.type === 'production' && <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded">생산</span>}
-                  {r.type === 'shipment' && <span className="px-2 py-1 bg-amber-100 text-amber-700 text-xs font-medium rounded">출고</span>}
+                  {r.type === 'incoming' && <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded whitespace-nowrap">📦 입고</span>}
+                  {r.type === 'production' && <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded whitespace-nowrap">🏭 생산</span>}
+                  {r.type === 'shipment' && <span className="px-2 py-1 bg-amber-100 text-amber-700 text-xs font-medium rounded whitespace-nowrap">🚛 출고</span>}
                 </td>
                 <td className="py-3 px-3 text-sm text-stone-800">
                   {r.type === 'incoming' && (
                     <div>
-                      <div>{r.farmName || r.supplier} ({r.quantity}판)</div>
-                      <div className="text-xs text-stone-500 mt-0.5 font-mono">
+                      <div className="font-medium">{r.farmName || r.supplier} <span className="text-stone-500 font-normal">({r.quantity}판)</span></div>
+                      <div className="text-xs text-stone-500 mt-0.5 font-mono flex flex-wrap gap-x-2">
                         {r.lotNo && <span className="text-blue-600 font-bold">{r.lotNo}</span>}
-                        {r.eggMark && <span className="ml-2">난각:{r.eggMark}</span>}
-                        {r.vehicle && <span className="ml-2">{r.vehicle}</span>}
+                        {r.eggMark && <span>난각:{r.eggMark}</span>}
+                        {r.vehicle && <span>{r.vehicle}</span>}
                       </div>
                       {r.layingDates && r.layingDates.length > 0 && (
                         <div className="text-xs text-amber-700 mt-0.5">
                           🥚 산란: {r.layingDates.map(d => d.slice(5).replace('-', '/')).join(', ')}
+                        </div>
+                      )}
+                      {r.specialNotes && (
+                        <div className="text-xs text-orange-700 mt-0.5">
+                          📌 {r.specialNotes}
                         </div>
                       )}
                     </div>
@@ -2562,9 +2767,6 @@ function HistoryView({ records, site, specLabel, onDelete, onExport, fmt, fmtD }
                 </td>
               </tr>
             ))}
-            {records.length === 0 && (
-              <tr><td colSpan={5} className="py-12 text-center text-stone-400">기록이 없습니다</td></tr>
-            )}
           </tbody>
         </table>
       </div>
