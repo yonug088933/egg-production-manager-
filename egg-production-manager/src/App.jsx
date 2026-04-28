@@ -12,13 +12,12 @@ import {
 
 // ============ Firebase 설정 (선별포장) ============
 const firebaseConfig = {
-  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
-  authDomain: "egg-production-manager.firebaseapp.com",
-  projectId: "egg-production-manager",
-  storageBucket: "egg-production-manager.firebasestorage.app",
-  messagingSenderId: "891063225076",
-  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
-  measurementId: "G-4BQTZ8YFRJ"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 const app = initializeApp(firebaseConfig);
@@ -2865,8 +2864,10 @@ function MaterialsView({ materials, records, site, onSaveMaterials, onSaveRecord
               )}
               {inventoryConnected && (
                 <span className="opacity-90">
-                  본점 {(inventoryItems?.main?.sub?.length || 0) + (inventoryItems?.main?.commonSub?.length || 0)}개, 
-                  지점 {(inventoryItems?.branch?.sub?.length || 0) + (inventoryItems?.branch?.commonSub?.length || 0)}개 부자재 동기화
+                  {isHq 
+                    ? `본점 부자재 ${(inventoryItems?.main?.sub?.length || 0)}개 동기화`
+                    : `지점 부자재 ${(inventoryItems?.branch?.sub?.length || 0)}개 동기화`
+                  }
                 </span>
               )}
             </div>
@@ -2903,6 +2904,7 @@ function MaterialsView({ materials, records, site, onSaveMaterials, onSaveRecord
         <InventoryStockView 
           inventoryItems={inventoryItems}
           inventoryConnected={inventoryConnected}
+          site={site}
           fmt={fmt}
         />
       )}
@@ -2921,7 +2923,7 @@ function TabBtn({ active, onClick, icon: Icon, label }) {
 }
 
 // 🆕 자연재고관리 재고 현황 표시
-function InventoryStockView({ inventoryItems, inventoryConnected, fmt }) {
+function InventoryStockView({ inventoryItems, inventoryConnected, site, fmt }) {
   if (!inventoryConnected) {
     return (
       <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-12 text-center">
@@ -2932,49 +2934,51 @@ function InventoryStockView({ inventoryItems, inventoryConnected, fmt }) {
     );
   }
   
-  const sections = [
-    { title: '본점 - 부자재 (sub)', items: inventoryItems?.main?.sub || [], branch: 'main', cat: 'sub' },
-    { title: '본점 - 공통 부자재 (commonSub)', items: inventoryItems?.main?.commonSub || [], branch: 'main', cat: 'commonSub' },
-    { title: '지점 - 부자재 (sub)', items: inventoryItems?.branch?.sub || [], branch: 'branch', cat: 'sub' },
-    { title: '지점 - 공통 부자재 (commonSub)', items: inventoryItems?.branch?.commonSub || [], branch: 'branch', cat: 'commonSub' },
-  ];
+  const isHq = site === 'hq';
+  const branch = isHq ? 'main' : 'branch';
+  const branchLabel = isHq ? '본점' : '지점';
+  
+  // 해당 사이트의 부자재만 (공통 제외)
+  const items = inventoryItems?.[branch]?.sub || [];
   
   return (
     <div className="space-y-4">
       <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-        💡 자연 재고관리 사이트의 실시간 재고입니다. 변경 사항은 자연 재고관리에서 직접 입력하세요.
+        💡 자연 재고관리 사이트의 <b>{branchLabel} 부자재</b> 실시간 재고입니다. 변경 사항은 자연 재고관리에서 직접 입력하세요.
       </div>
       
-      {sections.map((sec, sIdx) => {
-        if (sec.items.length === 0) return null;
-        return (
-          <div key={sIdx} className="bg-white rounded-xl border border-stone-200 p-4">
-            <h3 className="font-bold text-stone-900 mb-3">{sec.title}</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-              {sec.items.filter(it => it).map((it, idx) => {
-                const stock = parseFloat(it.stock) || 0;
-                const isOut = stock <= 0;
-                const isLow = stock > 0 && stock < 10;
-                return (
-                  <div key={`${sec.branch}_${sec.cat}_${idx}`} className={`p-3 rounded-lg border-2 ${
-                    isOut ? 'bg-red-50 border-red-300' :
-                    isLow ? 'bg-amber-50 border-amber-300' :
-                    'bg-stone-50 border-stone-200'
+      {items.filter(it => it).length === 0 ? (
+        <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-12 text-center">
+          <Package className="w-12 h-12 text-stone-300 mx-auto mb-3" />
+          <p className="text-stone-500">{branchLabel}에 등록된 부자재가 없습니다</p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-stone-200 p-4">
+          <h3 className="font-bold text-stone-900 mb-3">{branchLabel} 부자재 ({items.filter(it => it).length}개)</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            {items.filter(it => it).map((it, idx) => {
+              const stock = parseFloat(it.stock) || 0;
+              const isOut = stock <= 0;
+              const isLow = stock > 0 && stock < 10;
+              return (
+                <div key={`${branch}_sub_${idx}`} className={`p-3 rounded-lg border-2 ${
+                  isOut ? 'bg-red-50 border-red-300' :
+                  isLow ? 'bg-amber-50 border-amber-300' :
+                  'bg-stone-50 border-stone-200'
+                }`}>
+                  <div className="text-xs text-stone-500 mb-0.5 font-mono">{it.id}</div>
+                  <div className="font-bold text-stone-900 text-sm">{it.name}</div>
+                  <div className={`text-xl font-bold mt-1 ${
+                    isOut ? 'text-red-600' : isLow ? 'text-amber-700' : 'text-stone-900'
                   }`}>
-                    <div className="text-xs text-stone-500 mb-0.5 font-mono">{it.id}</div>
-                    <div className="font-bold text-stone-900 text-sm">{it.name}</div>
-                    <div className={`text-xl font-bold mt-1 ${
-                      isOut ? 'text-red-600' : isLow ? 'text-amber-700' : 'text-stone-900'
-                    }`}>
-                      {fmt(stock)} <span className="text-xs font-normal">{it.unit || 'EA'}</span>
-                    </div>
+                    {fmt(stock)} <span className="text-xs font-normal">{it.unit || 'EA'}</span>
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              );
+            })}
           </div>
-        );
-      })}
+        </div>
+      )}
     </div>
   );
 }
@@ -3161,6 +3165,10 @@ function MappingView({ site, hqSpecs, brProducts, inventoryItems, inventoryConne
                 <div className="space-y-2 mb-3">
                   {editing.map((m, idx) => {
                     const selectedItem = allInventoryItems.find(x => x.id === m.inventoryItemId);
+                    // 본점이면 main만, 지점이면 branch만 (공통 제외)
+                    const filteredOptions = allInventoryItems.filter(x => 
+                      x.branch === (isHq ? 'main' : 'branch') && x.cat === 'sub'
+                    );
                     return (
                       <div key={idx} className="flex gap-2 items-center bg-stone-50 p-2 rounded-lg">
                         <select 
@@ -3169,23 +3177,8 @@ function MappingView({ site, hqSpecs, brProducts, inventoryItems, inventoryConne
                           className="input-field flex-1"
                         >
                           <option value="">자연 재고관리에서 부자재 선택</option>
-                          <optgroup label="📦 본점 - 부자재 (sub)">
-                            {allInventoryItems.filter(x => x.branch === 'main' && x.cat === 'sub').map(x => 
-                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
-                            )}
-                          </optgroup>
-                          <optgroup label="🔧 본점 - 공통 부자재 (commonSub)">
-                            {allInventoryItems.filter(x => x.branch === 'main' && x.cat === 'commonSub').map(x => 
-                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
-                            )}
-                          </optgroup>
-                          <optgroup label="📦 지점 - 부자재 (sub)">
-                            {allInventoryItems.filter(x => x.branch === 'branch' && x.cat === 'sub').map(x => 
-                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
-                            )}
-                          </optgroup>
-                          <optgroup label="🔧 지점 - 공통 부자재 (commonSub)">
-                            {allInventoryItems.filter(x => x.branch === 'branch' && x.cat === 'commonSub').map(x => 
+                          <optgroup label={`📦 ${isHq ? '본점' : '지점'} 부자재`}>
+                            {filteredOptions.map(x => 
                               <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
                             )}
                           </optgroup>
