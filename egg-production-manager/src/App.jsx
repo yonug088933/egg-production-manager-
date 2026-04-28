@@ -12,12 +12,13 @@ import {
 
 // ============ Firebase 설정 (선별포장) ============
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
+  authDomain: "egg-production-manager.firebaseapp.com",
+  projectId: "egg-production-manager",
+  storageBucket: "egg-production-manager.firebasestorage.app",
+  messagingSenderId: "891063225076",
+  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
+  measurementId: "G-4BQTZ8YFRJ"
 };
 
 const app = initializeApp(firebaseConfig);
