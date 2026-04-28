@@ -1,25 +1,44 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Package, TrendingUp, Clock, Truck, AlertCircle, BarChart3, Calendar, Plus, Trash2, Download, RefreshCw, Egg, Factory, Building2, Store, Settings, X, Cloud, CloudOff, Search, Shield, FileText, MapPin, Hash, Truck as TruckIcon, ClipboardCheck, CheckCircle2, Circle, Box, Boxes, Layers } from 'lucide-react';
+import { Package, TrendingUp, Clock, Truck, AlertCircle, BarChart3, Calendar, Plus, Trash2, Download, RefreshCw, Egg, Factory, Building2, Store, Settings, X, Cloud, CloudOff, Search, Shield, FileText, MapPin, Hash, Truck as TruckIcon, ClipboardCheck, CheckCircle2, Circle, Box, Boxes, Layers, Link2, Send, Zap } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
   getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc, query, orderBy, where, limit 
 } from 'firebase/firestore';
+import { 
+  getDatabase, ref as dbRef, get as dbGet, set as dbSet, push as dbPush, update as dbUpdate, onValue
+} from 'firebase/database';
 
-// ============ Firebase 설정 ============
+// ============ Firebase 설정 (선별포장) ============
 const firebaseConfig = {
-  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
-  authDomain: "egg-production-manager.firebaseapp.com",
-  projectId: "egg-production-manager",
-  storageBucket: "egg-production-manager.firebasestorage.app",
-  messagingSenderId: "891063225076",
-  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
-  measurementId: "G-4BQTZ8YFRJ"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+// ============ 🔗 자연 재고관리 Firebase (별도 프로젝트) ============
+const inventoryFirebaseConfig = {
+  apiKey: "AIzaSyCIxmWelX3kgI-axuJ3KOgI-iGDkyz0wno",
+  databaseURL: "https://program-953e1-default-rtdb.firebaseio.com",
+  projectId: "program-953e1"
+};
+
+// 두 번째 Firebase 앱 (자연재고관리) 초기화 - 이름 다르게
+let inventoryDb = null;
+try {
+  const inventoryApp = getApps().find(a => a.name === 'inventory') 
+    || initializeApp(inventoryFirebaseConfig, 'inventory');
+  inventoryDb = getDatabase(inventoryApp);
+} catch (e) {
+  console.warn('자연재고관리 Firebase 초기화 실패:', e);
+}
 
 // ============ 본점 규격 ============
 const HQ_GRADES = ['왕', '특', '대', '중'];
@@ -219,6 +238,41 @@ export default function EggProductionManager() {
     return () => document.removeEventListener('wheel', handleWheel);
   }, []);
   
+  // 🔗 자연재고관리 부자재 실시간 로딩
+  const [inventoryItems, setInventoryItems] = useState({ main: { sub: [], commonSub: [] }, branch: { sub: [], commonSub: [] } });
+  const [inventoryConnected, setInventoryConnected] = useState(false);
+  
+  useEffect(() => {
+    if (!inventoryDb) return;
+    
+    try {
+      const invRef = dbRef(inventoryDb, 'inventory');
+      const unsub = onValue(invRef, (snap) => {
+        const data = snap.val();
+        if (data) {
+          setInventoryItems({
+            main: {
+              sub: data.main?.sub || [],
+              commonSub: data.main?.commonSub || []
+            },
+            branch: {
+              sub: data.branch?.sub || [],
+              commonSub: data.branch?.commonSub || []
+            }
+          });
+          setInventoryConnected(true);
+        }
+      }, (err) => {
+        console.warn('자연재고관리 연결 오류:', err);
+        setInventoryConnected(false);
+      });
+      
+      return () => unsub();
+    } catch (e) {
+      console.warn('자연재고관리 로딩 실패:', e);
+    }
+  }, []);
+  
   const saveRecord = async (record) => {
     setSaving(true);
     try {
@@ -284,12 +338,82 @@ export default function EggProductionManager() {
     } catch (e) { alert('저장 오류'); }
   };
   
+  // 🆕 자연재고관리에 자동 출고
+  // usageList: [{ inventoryItemId, branch (main|branch), cat (sub|commonSub), name, qty, unit }]
+  // memo: 출고 메모 (예: "선별포장 자동 - 청정원 25구 9박스 생산")
+  const sendToInventory = async (usageList, memo, productionDate) => {
+    if (!inventoryDb) {
+      throw new Error('자연재고관리 시스템에 연결할 수 없습니다.');
+    }
+    
+    if (usageList.length === 0) {
+      throw new Error('출고할 부자재가 없습니다.');
+    }
+    
+    const today = productionDate || new Date().toISOString().split('T')[0];
+    const errors = [];
+    const successes = [];
+    
+    for (const item of usageList) {
+      try {
+        // 1. 현재 재고 조회
+        const itemPath = `inventory/${item.branch}/${item.cat}`;
+        const snap = await dbGet(dbRef(inventoryDb, itemPath));
+        const currentArray = snap.val() || [];
+        
+        // 해당 ID 찾기
+        const idx = currentArray.findIndex(x => x && x.id === item.inventoryItemId);
+        if (idx === -1) {
+          errors.push(`${item.name}: 자연재고관리에서 찾을 수 없음`);
+          continue;
+        }
+        
+        const before = parseFloat(currentArray[idx].stock) || 0;
+        const after = before - item.qty;
+        
+        // 2. 재고 업데이트
+        await dbUpdate(
+          dbRef(inventoryDb, `${itemPath}/${idx}`),
+          { stock: after }
+        );
+        
+        // 3. logs에 기록 추가
+        const logId = `${Date.now()}_${Math.random()}`;
+        const logEntry = {
+          after,
+          before,
+          branch: item.branch,
+          cat: item.cat,
+          date: today,
+          id: logId,
+          name: item.name,
+          note: memo || '선별포장 시스템 자동 출고',
+          qty: item.qty,
+          type: '출고',
+          unit: item.unit || 'EA',
+          writer: '선별포장 자동'
+        };
+        
+        // logs는 배열이므로 push로 추가
+        await dbPush(dbRef(inventoryDb, 'logs'), logEntry);
+        
+        successes.push({ ...item, before, after });
+      } catch (e) {
+        errors.push(`${item.name}: ${e.message}`);
+      }
+    }
+    
+    return { successes, errors };
+  };
+  
   // ============ 폼 ============
   const [incomingForm, setIncomingForm] = useState({
     date: todayDate, farmId: '', supplier: '', eggMark: '', vehicle: '',
-    // 등급별 수량: { 특: 0, 대: 0, 중: 0, 왕: 0 }
+    layingDates: [todayDate], // 산란일 (여러 개 가능)
     grades: { '왕': '', '특': '', '대': '', '중': '' },
-    note: ''
+    note: '',
+    specialNotes: '',  // 🆕 특이사항 (긴 메모)
+    photos: []  // 🆕 사진 (base64 배열)
   });
   
   const [productionForm, setProductionForm] = useState({
@@ -357,18 +481,24 @@ export default function EggProductionManager() {
       supplier: incomingForm.supplier,
       eggMark: incomingForm.eggMark,
       vehicle: incomingForm.vehicle,
+      layingDates: (incomingForm.layingDates || []).filter(d => d),  // 🆕 산란일 배열
       quantity: totalQuantity,                // 총 수량 (호환성)
       gradeQuantities: gradeQuantities,       // 🆕 등급별 수량
       unit: '판',
       remainingPans: totalQuantity,
       note: incomingForm.note, 
+      specialNotes: incomingForm.specialNotes || '',  // 🆕 특이사항
+      photos: incomingForm.photos || [],              // 🆕 사진
       createdAt: new Date().toISOString()
     };
     if (await saveRecord(record)) {
       setIncomingForm({ 
         date: todayDate, farmId: '', supplier: '', eggMark: '', vehicle: '', 
+        layingDates: [todayDate],
         grades: { '왕': '', '특': '', '대': '', '중': '' },
-        note: '' 
+        note: '',
+        specialNotes: '',
+        photos: []
       });
       const gradeStr = Object.entries(gradeQuantities).map(([g, q]) => `${g}란 ${q.toLocaleString()}판`).join(', ');
       alert(`입고 저장 완료\nLot 번호: ${lotNo}\n농장: ${record.farmName}\n수량: ${gradeStr}\n합계: ${totalQuantity.toLocaleString()}판`);
@@ -758,27 +888,27 @@ export default function EggProductionManager() {
   return (
     <div className="min-h-screen bg-stone-50">
       <header className="bg-white border-b-2 border-amber-600 shadow-sm sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-md">
+        <div className="max-w-7xl mx-auto px-3 md:px-4 py-2.5 md:py-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
+            <div className="w-9 h-9 md:w-10 md:h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-md flex-shrink-0">
               <Egg className="w-5 h-5 text-white" strokeWidth={2.5} />
             </div>
-            <div>
-              <h1 className="text-base md:text-lg font-bold text-stone-900 tracking-tight">계란 생산 관리 시스템</h1>
-              <p className="text-xs text-stone-500 flex items-center gap-1.5">
-                {todayDate} ({['일','월','화','수','목','금','토'][new Date().getDay()]})
+            <div className="min-w-0">
+              <h1 className="text-sm md:text-lg font-bold text-stone-900 tracking-tight truncate">계란 생산 관리</h1>
+              <p className="text-[10px] md:text-xs text-stone-500 flex items-center gap-1 md:gap-1.5">
+                <span className="hidden md:inline">{todayDate} ({['일','월','화','수','목','금','토'][new Date().getDay()]})</span>
+                <span className="md:hidden">{todayDate.slice(5)} ({['일','월','화','수','목','금','토'][new Date().getDay()]})</span>
                 {online ? (
-                  <span className="flex items-center gap-1 text-green-600"><Cloud className="w-3 h-3" />실시간</span>
+                  <span className="flex items-center gap-0.5 text-green-600"><Cloud className="w-3 h-3" />실시간</span>
                 ) : (
-                  <span className="flex items-center gap-1 text-red-500"><CloudOff className="w-3 h-3" />오프라인</span>
+                  <span className="flex items-center gap-0.5 text-red-500"><CloudOff className="w-3 h-3" />오프라인</span>
                 )}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {/* 🆕 역학조사 버튼 */}
+          <div className="flex items-center gap-1 md:gap-2 flex-shrink-0">
             <button onClick={() => setShowTracer(true)} 
-              className="flex items-center gap-1.5 px-3 py-2 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-semibold text-red-700 transition border border-red-200" 
+              className="flex items-center gap-1 px-2 md:px-3 py-2 bg-red-50 hover:bg-red-100 rounded-lg text-xs md:text-sm font-semibold text-red-700 transition border border-red-200" 
               title="역학조사 / Lot 추적">
               <Shield className="w-4 h-4" />
               <span className="hidden md:inline">역학조사</span>
@@ -794,22 +924,24 @@ export default function EggProductionManager() {
           </div>
         </div>
         
-        <div className="max-w-7xl mx-auto px-4 pb-2 flex gap-2">
-          <SiteButton active={activeSite === 'overview'} onClick={() => setActiveSite('overview')} icon={BarChart3} label="전체 종합" />
-          <SiteButton active={activeSite === 'hq'} onClick={() => { setActiveSite('hq'); setActiveTab('dashboard'); }} icon={Building2} label="본점 (식자재)" />
-          <SiteButton active={activeSite === 'branch'} onClick={() => { setActiveSite('branch'); setActiveTab('dashboard'); }} icon={Store} label="지점 (제품)" />
+        {/* 사이트 선택 - 모바일 최적화 */}
+        <div className="max-w-7xl mx-auto px-3 md:px-4 pb-2 flex gap-1.5 md:gap-2 overflow-x-auto">
+          <SiteButton active={activeSite === 'overview'} onClick={() => setActiveSite('overview')} icon={BarChart3} label="종합" labelFull="전체 종합" />
+          <SiteButton active={activeSite === 'hq'} onClick={() => { setActiveSite('hq'); setActiveTab('dashboard'); }} icon={Building2} label="본점" labelFull="본점 (식자재)" />
+          <SiteButton active={activeSite === 'branch'} onClick={() => { setActiveSite('branch'); setActiveTab('dashboard'); }} icon={Store} label="지점" labelFull="지점 (제품)" />
         </div>
         
         {activeSite !== 'overview' && (
-          <div className="max-w-7xl mx-auto px-4 flex gap-1 overflow-x-auto border-t border-stone-100">
+          <div className="max-w-7xl mx-auto px-3 md:px-4 flex gap-0.5 md:gap-1 overflow-x-auto border-t border-stone-100 scrollbar-hide">
             {tabs.map(tab => {
               const Icon = tab.icon;
               return (
                 <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-3 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition ${
+                  className={`flex items-center gap-1.5 px-2.5 md:px-3 py-2 md:py-2.5 text-xs md:text-sm font-medium whitespace-nowrap border-b-2 transition ${
                     activeTab === tab.id ? 'border-amber-600 text-amber-700' : 'border-transparent text-stone-500 hover:text-stone-800'
                   }`}>
-                  <Icon className="w-4 h-4" />{tab.label}
+                  <Icon className="w-4 h-4 flex-shrink-0" />
+                  <span>{tab.label}</span>
                 </button>
               );
             })}
@@ -817,7 +949,7 @@ export default function EggProductionManager() {
         )}
       </header>
       
-      <main className="max-w-7xl mx-auto px-4 py-5">
+      <main className="max-w-7xl mx-auto px-3 md:px-4 py-3 md:py-5">
         {activeSite === 'overview' && (
           <OverviewDashboard 
             hqStats={hqStats} brStats={brStats} allStats={allStats}
@@ -862,6 +994,9 @@ export default function EggProductionManager() {
             onToggleLot={toggleSourceLot}
             materials={materials}
             productMaterialMap={productMaterialMap}
+            inventoryItems={inventoryItems}
+            inventoryConnected={inventoryConnected}
+            onSendToInventory={sendToInventory}
             fmt={fmt} fmtD={fmtD}
           />
         )}
@@ -891,6 +1026,8 @@ export default function EggProductionManager() {
             hqSpecs={hqSpecs} brProducts={brProducts}
             productMaterialMap={productMaterialMap}
             onSaveMap={saveProductMaterialMap}
+            inventoryItems={inventoryItems}
+            inventoryConnected={inventoryConnected}
             fmt={fmt}
           />
         )}
@@ -958,18 +1095,31 @@ export default function EggProductionManager() {
           -webkit-appearance: none;
           margin: 0;
         }
+        /* 스크롤바 숨김 */
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        /* 모바일에서 input 더 크게 (터치 편의) */
+        @media (max-width: 768px) {
+          .input-field {
+            padding: 0.75rem 0.85rem;
+            font-size: 16px; /* iOS 자동 확대 방지 */
+          }
+        }
       `}</style>
     </div>
   );
 }
 
 // ============ 컴포넌트들 ============
-function SiteButton({ active, onClick, icon: Icon, label }) {
+function SiteButton({ active, onClick, icon: Icon, label, labelFull }) {
   return (
-    <button onClick={onClick} className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition ${
+    <button onClick={onClick} className={`flex-1 md:flex-none flex items-center justify-center gap-1.5 md:gap-2 px-2.5 md:px-4 py-2 rounded-lg text-xs md:text-sm font-semibold transition whitespace-nowrap ${
       active ? 'bg-amber-500 text-white shadow-sm' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
     }`}>
-      <Icon className="w-4 h-4" />{label}
+      <Icon className="w-4 h-4 flex-shrink-0" />
+      <span className="md:hidden">{label}</span>
+      <span className="hidden md:inline">{labelFull || label}</span>
     </button>
   );
 }
@@ -997,13 +1147,13 @@ function OverviewDashboard({ hqStats, brStats, allStats, records, specMap, getWe
   }, [records]);
   
   return (
-    <div className="space-y-5">
-      <div className="bg-gradient-to-r from-amber-500 to-orange-500 rounded-2xl p-6 text-white shadow-lg">
-        <div className="flex items-center gap-2 mb-1 opacity-90 text-sm">
+    <div className="space-y-4 md:space-y-5">
+      <div className="bg-gradient-to-r from-amber-500 to-orange-500 rounded-2xl p-4 md:p-6 text-white shadow-lg">
+        <div className="flex items-center gap-2 mb-1 opacity-90 text-xs md:text-sm">
           <BarChart3 className="w-4 h-4" />대표님 종합 대시보드
         </div>
-        <h2 className="text-2xl font-bold mb-4">전체 사업장 오늘의 현황</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <h2 className="text-lg md:text-2xl font-bold mb-3 md:mb-4">전체 사업장 오늘의 현황</h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
           <BigStat label="총 입고" value={fmt(allStats.todayIncoming)} unit="판" />
           <BigStat label="생산" value={`${fmt(hqStats.todayPans)}판 / ${fmt(brStats.todayProduced)}개`} unit={`본점 ${fmtD(hqStats.todayPallets)}PLT · 지점 ${fmt(brStats.todayBoxes)}박스`} />
           <BigStat label="총 로스" value={fmt(allStats.todayLoss)} unit={`개 (${allStats.todayLossRate}%)`} />
@@ -1120,15 +1270,15 @@ function SiteDashboard({ site, stats, weeklyData, itemStats, specMap, fmt, fmtD 
   const isHq = site === 'hq';
   
   return (
-    <div className="space-y-5">
+    <div className="space-y-4 md:space-y-5">
       <div className="flex items-center gap-2 text-stone-700">
         <ItemIcon className="w-5 h-5 text-amber-600" />
-        <h2 className="font-bold text-lg">{siteLabel} 대시보드</h2>
+        <h2 className="font-bold text-base md:text-lg">{siteLabel} 대시보드</h2>
       </div>
       
       <div>
-        <h3 className="text-sm font-bold text-stone-600 mb-3 uppercase tracking-wide">오늘의 현황</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <h3 className="text-xs md:text-sm font-bold text-stone-600 mb-2 md:mb-3 uppercase tracking-wide">오늘의 현황</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
           <StatCard icon={Package} label="입고" value={fmt(stats.todayIncoming)} unit="판" color="blue" />
           {isHq ? (
             <StatCard icon={Factory} label="생산" value={`${fmt(stats.todayPans)}판`} unit={`${fmtD(stats.todayPallets)} 파렛`} color="green" />
@@ -1144,7 +1294,7 @@ function SiteDashboard({ site, stats, weeklyData, itemStats, specMap, fmt, fmtD 
         </div>
       </div>
       
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 md:gap-3">
         <InfoCard icon={Clock} label="오늘 작업시간" value={`${Math.floor(stats.todayMinutes / 60)}시간 ${stats.todayMinutes % 60}분`} sub={`작업 ${stats.todayProductionCount}회`} />
         <InfoCard icon={TrendingUp} label="시간당 평균" value={fmt(stats.todayPerHour)} sub={isHq ? '판 / 시간' : '개 / 시간'} />
         {isHq ? (
@@ -1267,10 +1417,10 @@ function SiteCard({ icon: Icon, title, color, stats, fmt, fmtD, siteType }) {
 
 function BigStat({ label, value, unit }) {
   return (
-    <div className="bg-white/15 backdrop-blur rounded-xl p-3">
-      <div className="text-xs opacity-90 mb-1">{label}</div>
-      <div className="text-base md:text-lg font-bold leading-tight">{value}</div>
-      <div className="text-xs opacity-75 mt-0.5">{unit}</div>
+    <div className="bg-white/15 backdrop-blur rounded-xl p-2 md:p-3">
+      <div className="text-[10px] md:text-xs opacity-90 mb-0.5 md:mb-1">{label}</div>
+      <div className="text-xs md:text-lg font-bold leading-tight break-words">{value}</div>
+      <div className="text-[10px] md:text-xs opacity-75 mt-0.5">{unit}</div>
     </div>
   );
 }
@@ -1281,27 +1431,27 @@ function StatCard({ icon: Icon, label, value, unit, color }) {
     red: 'bg-red-50 text-red-600', amber: 'bg-amber-50 text-amber-600',
   };
   return (
-    <div className="bg-white rounded-xl p-4 border border-stone-200 hover:shadow-md transition">
-      <div className="flex items-start justify-between mb-2">
-        <span className="text-xs text-stone-500 font-medium">{label}</span>
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${colors[color]}`}>
+    <div className="bg-white rounded-xl p-3 md:p-4 border border-stone-200 hover:shadow-md transition">
+      <div className="flex items-start justify-between mb-1.5 md:mb-2">
+        <span className="text-[10px] md:text-xs text-stone-500 font-medium">{label}</span>
+        <div className={`w-7 h-7 md:w-8 md:h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${colors[color]}`}>
           <Icon className="w-4 h-4" />
         </div>
       </div>
-      <div className="text-xl font-bold text-stone-900 leading-tight">{value}</div>
-      <div className="text-xs text-stone-500 mt-0.5">{unit}</div>
+      <div className="text-base md:text-xl font-bold text-stone-900 leading-tight break-words">{value}</div>
+      <div className="text-[10px] md:text-xs text-stone-500 mt-0.5">{unit}</div>
     </div>
   );
 }
 
 function InfoCard({ icon: Icon, label, value, sub }) {
   return (
-    <div className="bg-white rounded-xl p-4 border border-stone-200">
-      <div className="flex items-center gap-2 text-stone-500 text-sm mb-2">
+    <div className="bg-white rounded-xl p-3 md:p-4 border border-stone-200">
+      <div className="flex items-center gap-2 text-stone-500 text-xs md:text-sm mb-1.5 md:mb-2">
         <Icon className="w-4 h-4" />{label}
       </div>
-      <div className="text-xl font-bold text-stone-900">{value}</div>
-      <div className="text-xs text-stone-500 mt-0.5">{sub}</div>
+      <div className="text-base md:text-xl font-bold text-stone-900 break-words">{value}</div>
+      <div className="text-[10px] md:text-xs text-stone-500 mt-0.5">{sub}</div>
     </div>
   );
 }
@@ -1309,9 +1459,9 @@ function InfoCard({ icon: Icon, label, value, sub }) {
 function FormCard({ title, icon: Icon, color, children }) {
   const colors = { blue: 'bg-blue-500', green: 'bg-green-500', amber: 'bg-amber-500' };
   return (
-    <div className="bg-white rounded-xl border border-stone-200 p-5">
-      <h2 className="text-base font-bold text-stone-900 mb-4 flex items-center gap-3">
-        <div className={`w-9 h-9 ${colors[color]} rounded-lg flex items-center justify-center`}>
+    <div className="bg-white rounded-xl border border-stone-200 p-3 md:p-5">
+      <h2 className="text-sm md:text-base font-bold text-stone-900 mb-3 md:mb-4 flex items-center gap-2 md:gap-3">
+        <div className={`w-8 h-8 md:w-9 md:h-9 ${colors[color]} rounded-lg flex items-center justify-center flex-shrink-0`}>
           <Icon className="w-4 h-4 text-white" />
         </div>{title}
       </h2>
@@ -1323,7 +1473,7 @@ function FormCard({ title, icon: Icon, color, children }) {
 function Field({ label, required, children, className = '' }) {
   return (
     <div className={className}>
-      <label className="block text-sm font-semibold text-stone-700 mb-1.5">
+      <label className="block text-xs md:text-sm font-semibold text-stone-700 mb-1 md:mb-1.5">
         {label} {required && <span className="text-red-500">*</span>}
       </label>
       {children}
@@ -1333,77 +1483,165 @@ function Field({ label, required, children, className = '' }) {
 
 // 🆕 입고 폼 (역학조사 정보 포함)
 function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, onOpenFarmManager, todayRecords, onDelete, site, fmt }) {
-  // 등급별 수량 합계 계산
   const totalPans = HQ_GRADES.reduce((sum, g) => sum + (parseInt(form.grades?.[g]) || 0), 0);
   
   const updateGrade = (grade, value) => {
-    setForm({
-      ...form,
-      grades: { ...form.grades, [grade]: value }
-    });
+    setForm({ ...form, grades: { ...form.grades, [grade]: value } });
   };
+  
+  // 산란일 다중
+  const layingDates = form.layingDates || [form.date];
+  const addLayingDate = () => setForm({ ...form, layingDates: [...layingDates, form.date] });
+  const updateLayingDate = (idx, value) => {
+    const newDates = [...layingDates];
+    newDates[idx] = value;
+    setForm({ ...form, layingDates: newDates });
+  };
+  const removeLayingDate = (idx) => {
+    if (layingDates.length <= 1) return;
+    setForm({ ...form, layingDates: layingDates.filter((_, i) => i !== idx) });
+  };
+  
+  // 사진 업로드
+  const handlePhotoUpload = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    
+    const photos = form.photos || [];
+    if (photos.length + files.length > 5) {
+      alert('사진은 최대 5장까지 가능합니다.');
+      return;
+    }
+    
+    files.forEach(file => {
+      // 1MB 제한
+      if (file.size > 1024 * 1024) {
+        alert(`${file.name}\n파일 크기가 1MB를 초과합니다. 더 작은 사진을 선택해주세요.`);
+        return;
+      }
+      
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        // 이미지 압축
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxWidth = 1200;
+          const ratio = Math.min(maxWidth / img.width, maxWidth / img.height, 1);
+          canvas.width = img.width * ratio;
+          canvas.height = img.height * ratio;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/jpeg', 0.7);
+          
+          setForm(prev => ({
+            ...prev,
+            photos: [...(prev.photos || []), { 
+              data: compressed, 
+              name: file.name,
+              uploadedAt: new Date().toISOString()
+            }]
+          }));
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    
+    e.target.value = ''; // 같은 파일 다시 선택 가능
+  };
+  
+  const removePhoto = (idx) => {
+    setForm({ ...form, photos: form.photos.filter((_, i) => i !== idx) });
+  };
+  
+  const photos = form.photos || [];
   
   return (
     <FormCard title={`원란 입고 - ${site === 'hq' ? '본점' : '지점'}`} icon={Package} color="blue">
-      {/* 역학조사 안내 */}
-      <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl">
-        <div className="flex items-center gap-2 text-sm font-bold text-red-800 mb-1">
-          <Shield className="w-4 h-4" />역학조사 추적 정보
-        </div>
-        <div className="text-xs text-red-700">
-          AI(조류독감) 등 역학조사 시 필수 항목입니다. <b>농장명·난각표시·차량번호</b>는 꼭 정확히 기록해주세요.
+      
+      {/* 안내 박스 - 더 깔끔하게 */}
+      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex items-start gap-2">
+        <Shield className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
+        <div className="text-xs text-blue-800">
+          <b>역학조사 추적</b> · 농장명, 난각표시는 정확하게 기록해주세요. 차량번호는 모를 때 비워두셔도 됩니다.
         </div>
       </div>
       
-      {/* 기본 정보 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="입고 날짜">
-          <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
-        </Field>
-        
-        <Field label="등록 농장 선택 (선택)">
-          <div className="flex gap-2">
-            <select value={form.farmId} onChange={e => onSelectFarm(e.target.value)} className="input-field flex-1">
-              <option value="">직접 입력</option>
-              {farms.map(f => (
-                <option key={f.id} value={f.id}>{f.name} {f.farmCode ? `(${f.farmCode})` : ''}</option>
-              ))}
-            </select>
-            <button type="button" onClick={onOpenFarmManager} className="px-3 py-2 bg-stone-100 hover:bg-stone-200 rounded-lg text-stone-600" title="농장 관리">
-              <Settings className="w-4 h-4" />
-            </button>
+      {/* 1. 기본 정보 (날짜 + 농장) */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs flex items-center justify-center font-bold">1</span>
+          기본 정보
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="입고 날짜">
+            <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
+          </Field>
+          
+          <Field label="등록 농장 선택 (선택)">
+            <div className="flex gap-2">
+              <select value={form.farmId} onChange={e => onSelectFarm(e.target.value)} className="input-field flex-1">
+                <option value="">직접 입력</option>
+                {farms.map(f => (
+                  <option key={f.id} value={f.id}>{f.name} {f.farmCode ? `(${f.farmCode})` : ''}</option>
+                ))}
+              </select>
+              <button type="button" onClick={onOpenFarmManager} className="px-3 py-2 bg-stone-100 hover:bg-stone-200 rounded-lg text-stone-600" title="농장 관리">
+                <Settings className="w-4 h-4" />
+              </button>
+            </div>
+          </Field>
+          
+          <Field label="농장명 / 공급처" required>
+            <input type="text" value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})} placeholder="예: 00농장" className="input-field" />
+          </Field>
+          
+          <Field label="난각 표시" required>
+            <input type="text" value={form.eggMark} onChange={e => setForm({...form, eggMark: e.target.value})} placeholder="예: 1206 M3FDS 2" className="input-field font-mono" />
+          </Field>
+          
+          <Field label="운반 차량번호 (선택)">
+            <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="모르면 빈칸" className="input-field" />
+          </Field>
+        </div>
+      </div>
+      
+      {/* 2. 산란일 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs flex items-center justify-center font-bold">2</span>
+          산란일 <span className="text-xs font-normal text-stone-500">(여러 날짜 가능)</span>
+        </h3>
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
+          <div className="space-y-2">
+            {layingDates.map((d, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <span className="text-xs text-amber-700 font-bold w-8 flex-shrink-0">#{idx + 1}</span>
+                <input type="date" value={d} onChange={e => updateLayingDate(idx, e.target.value)} className="input-field flex-1" />
+                {layingDates.length > 1 && (
+                  <button type="button" onClick={() => removeLayingDate(idx)} className="p-2 text-stone-400 hover:text-red-500 flex-shrink-0">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
-        </Field>
-        
-        <Field label="농장명 / 공급처" required>
-          <input type="text" value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})} placeholder="예: 00농장" className="input-field" />
-        </Field>
-        
-        <Field label="난각 표시" required>
-          <input type="text" value={form.eggMark} onChange={e => setForm({...form, eggMark: e.target.value})} placeholder="예: 1206 M3FDS 2" className="input-field font-mono" />
-        </Field>
-        
-        <Field label="운반 차량번호" required>
-          <input type="text" value={form.vehicle} onChange={e => setForm({...form, vehicle: e.target.value})} placeholder="예: 12가 3456" className="input-field" />
-        </Field>
-        
-        <Field label="비고">
-          <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택사항" className="input-field" />
-        </Field>
+          <button type="button" onClick={addLayingDate} 
+            className="w-full mt-2 py-2 border-2 border-dashed border-amber-400 hover:border-amber-500 hover:bg-white text-amber-700 rounded-lg text-sm font-semibold flex items-center justify-center gap-1 transition">
+            <Plus className="w-4 h-4" />산란일 추가 (혼합 입고시)
+          </button>
+        </div>
       </div>
       
-      {/* 🆕 등급별 입고 수량 */}
-      <div className="mt-5 p-4 bg-blue-50 border-2 border-blue-200 rounded-xl">
-        <div className="flex items-center justify-between mb-3">
-          <label className="text-sm font-bold text-blue-900 flex items-center gap-2">
-            <Egg className="w-4 h-4" />등급별 입고 수량 (판)
-            <span className="text-red-500">*</span>
-          </label>
-          <span className="text-xs text-blue-700">
-            합계: <b className="text-base">{fmt(totalPans)}판</b>
-          </span>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      {/* 3. 등급별 수량 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs flex items-center justify-center font-bold">3</span>
+          등급별 입고 수량 <span className="text-red-500">*</span>
+          <span className="ml-auto text-xs font-normal text-stone-500">합계: <b className="text-base text-blue-700">{fmt(totalPans)}판</b></span>
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-3">
           {HQ_GRADES.map(grade => {
             const colorMap = {
               '왕': 'bg-purple-50 border-purple-300 text-purple-900',
@@ -1413,38 +1651,130 @@ function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, on
             };
             return (
               <div key={grade} className={`p-3 rounded-lg border-2 ${colorMap[grade]}`}>
-                <label className="block text-xs font-bold mb-1.5 opacity-80">{grade}란</label>
-                <input
-                  type="number"
-                  value={form.grades?.[grade] || ''}
-                  onChange={e => updateGrade(grade, e.target.value)}
-                  placeholder="0"
-                  className="w-full px-3 py-2 bg-white border border-current/30 rounded-md text-lg font-bold text-stone-900 focus:outline-none focus:ring-2 focus:ring-current/40"
-                  inputMode="numeric"
-                />
-                <div className="text-xs mt-1 opacity-70">판</div>
+                <label className="block text-xs font-bold mb-1 opacity-80">{grade}란</label>
+                <input type="number" value={form.grades?.[grade] || ''} onChange={e => updateGrade(grade, e.target.value)}
+                  placeholder="0" className="w-full px-2 py-1.5 bg-white border border-current/30 rounded text-base md:text-lg font-bold text-stone-900 focus:outline-none focus:ring-2 focus:ring-current/20"
+                  inputMode="numeric" />
+                <div className="text-[10px] mt-1 opacity-60">판</div>
               </div>
             );
           })}
         </div>
-        <div className="text-xs text-blue-700 mt-2">
-          💡 입고된 등급만 입력하시면 됩니다. 빈 칸은 입고 안 된 것으로 처리됩니다.
+      </div>
+      
+      {/* 4. 특이사항 + 사진 */}
+      <div className="mb-4">
+        <h3 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+          <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs flex items-center justify-center font-bold">4</span>
+          특이사항 / 사진 <span className="text-xs font-normal text-stone-500">(선택)</span>
+        </h3>
+        <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl space-y-3">
+          <Field label="간단 비고">
+            <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="짧은 메모" className="input-field" />
+          </Field>
+          
+          <Field label="특이사항 상세">
+            <textarea 
+              value={form.specialNotes || ''} 
+              onChange={e => setForm({...form, specialNotes: e.target.value})}
+              placeholder="예: 일부 파각란 발견, 운송 중 깨짐, 농장에서 별도 표시 등 자세한 내용을 작성하세요"
+              rows={3}
+              className="input-field resize-none"
+            />
+          </Field>
+          
+          {/* 사진 업로드 */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-xs md:text-sm font-semibold text-stone-700">
+                사진 첨부 <span className="text-xs font-normal text-stone-500">({photos.length}/5)</span>
+              </label>
+              {photos.length < 5 && (
+                <label className="cursor-pointer px-3 py-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-300 rounded-lg text-xs font-semibold text-blue-700 flex items-center gap-1">
+                  📷 사진 추가
+                  <input type="file" accept="image/*" multiple onChange={handlePhotoUpload} className="hidden" />
+                </label>
+              )}
+            </div>
+            
+            {photos.length === 0 ? (
+              <label className="cursor-pointer block p-6 border-2 border-dashed border-stone-300 hover:border-blue-400 hover:bg-blue-50/50 rounded-lg text-center transition">
+                <div className="text-3xl mb-1">📷</div>
+                <div className="text-sm font-semibold text-stone-600">사진 첨부하기</div>
+                <div className="text-xs text-stone-500 mt-0.5">최대 5장 · 1MB 이하</div>
+                <input type="file" accept="image/*" multiple onChange={handlePhotoUpload} className="hidden" />
+              </label>
+            ) : (
+              <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
+                {photos.map((p, idx) => (
+                  <div key={idx} className="relative group aspect-square">
+                    <img src={p.data} alt="" className="w-full h-full object-cover rounded-lg border border-stone-200" />
+                    <button 
+                      type="button" 
+                      onClick={() => removePhoto(idx)}
+                      className="absolute top-1 right-1 w-6 h-6 bg-red-500 hover:bg-red-600 text-white rounded-full flex items-center justify-center shadow-md opacity-0 group-hover:opacity-100 md:opacity-100 transition"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
       
-      <div className="mt-4 p-3 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-600">
-        💡 저장하면 <b>Lot 번호가 자동 생성</b>됩니다 (예: L-260425-001). 생산 시 어느 Lot을 사용했는지 선택하면 출고까지 자동 추적됩니다.
+      {/* 안내 */}
+      <div className="mb-4 p-3 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-600">
+        💡 저장하면 <b>Lot 번호가 자동 생성</b>됩니다 (예: L-260425-001)
       </div>
       
-      <button onClick={onSubmit} disabled={saving || totalPans === 0} className="w-full mt-5 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
-        <Plus className="w-5 h-5" />{saving ? '저장 중...' : `입고 등록 (총 ${fmt(totalPans)}판)`}
+      {/* 등록 버튼 */}
+      <button onClick={onSubmit} disabled={saving || totalPans === 0} 
+        className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-stone-300 disabled:to-stone-300 text-white font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-md text-base">
+        <Plus className="w-5 h-5" />{saving ? '저장 중...' : `입고 등록 ${totalPans > 0 ? `(총 ${fmt(totalPans)}판)` : ''}`}
       </button>
       
       <TodayList 
         records={todayRecords} title="오늘 입고 내역" onDelete={onDelete}
         columns={[
           { header: 'Lot', render: r => <span className="font-mono text-xs text-blue-600 font-bold">{r.lotNo || '-'}</span> },
-          { header: '농장', render: r => <span className="font-medium text-stone-800">{r.farmName || r.supplier}</span> },
+          { header: '농장', render: r => (
+            <div>
+              <div className="font-medium text-stone-800">{r.farmName || r.supplier}</div>
+              {r.layingDates && r.layingDates.length > 0 && (
+                <div className="text-xs text-amber-700 mt-0.5">
+                  🥚 산란: {r.layingDates.map(d => d.slice(5).replace('-', '/')).join(', ')}
+                </div>
+              )}
+              {r.specialNotes && (
+                <div className="text-xs text-orange-700 mt-0.5 line-clamp-1" title={r.specialNotes}>
+                  📌 {r.specialNotes}
+                </div>
+              )}
+              {r.photos && r.photos.length > 0 && (
+                <div className="flex gap-1 mt-1">
+                  {r.photos.slice(0, 3).map((p, i) => (
+                    <img 
+                      key={i} 
+                      src={p.data} 
+                      alt="" 
+                      className="w-8 h-8 object-cover rounded border border-stone-200 cursor-pointer"
+                      onClick={() => {
+                        const w = window.open();
+                        if (w) w.document.write(`<img src="${p.data}" style="max-width:100%;height:auto;" />`);
+                      }}
+                    />
+                  ))}
+                  {r.photos.length > 3 && (
+                    <div className="w-8 h-8 bg-stone-100 rounded border border-stone-200 flex items-center justify-center text-xs text-stone-600 font-bold">
+                      +{r.photos.length - 3}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )},
           { header: '난각', render: r => <span className="font-mono text-xs text-stone-600">{r.eggMark || '-'}</span> },
           { header: '차량', render: r => <span className="text-xs text-stone-600">{r.vehicle || '-'}</span> },
           { header: '등급별 수량', render: r => (
@@ -1465,20 +1795,20 @@ function IncomingForm({ form, setForm, onSubmit, saving, farms, onSelectFarm, on
   );
 }
 
-function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveItem, onSubmit, saving, site, hqSpecs, brProducts, specMap, todayRecords, onDelete, specLabel, onOpenManager, recentLots, onToggleLot, materials, productMaterialMap, fmt, fmtD }) {
+function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemoveItem, onSubmit, saving, site, hqSpecs, brProducts, specMap, todayRecords, onDelete, specLabel, onOpenManager, recentLots, onToggleLot, materials, productMaterialMap, inventoryItems, inventoryConnected, onSendToInventory, fmt, fmtD }) {
   const isHq = site === 'hq';
+  const [sendingToInventory, setSendingToInventory] = useState(false);
   
-  // 🆕 부자재 사용량 자동 계산
+  // 🆕 부자재 사용량 자동 계산 (자연재고관리 부자재 기반)
   const materialUsage = useMemo(() => {
-    const usage = {}; // { materialId: totalQty }
+    const usage = {}; // { inventoryItemId: { ...info, total } }
     
     items.forEach(item => {
       if (!item.specId) return;
       const mappings = productMaterialMap?.[item.specId] || [];
       
       mappings.forEach(map => {
-        const mat = materials.find(m => m.id === map.materialId);
-        if (!mat) return;
+        if (!map.inventoryItemId) return;
         
         // 본점은 판수, 지점은 박스 기준
         const productionQty = isHq 
@@ -1488,21 +1818,35 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
         const totalUsage = productionQty * (parseFloat(map.quantity) || 0);
         
         if (totalUsage > 0) {
-          if (!usage[map.materialId]) {
-            usage[map.materialId] = { material: mat, total: 0 };
+          if (!usage[map.inventoryItemId]) {
+            usage[map.inventoryItemId] = {
+              inventoryItemId: map.inventoryItemId,
+              name: map.name || '',
+              unit: map.unit || 'EA',
+              branch: map.branch || 'main',
+              cat: map.cat || 'sub',
+              total: 0
+            };
           }
-          usage[map.materialId].total += totalUsage;
+          usage[map.inventoryItemId].total += totalUsage;
         }
       });
     });
     
     return Object.values(usage);
-  }, [items, productMaterialMap, materials, isHq]);
+  }, [items, productMaterialMap, isHq]);
+  
+  // 자연재고관리에서 현재 재고 조회
+  const getInventoryStock = (branch, cat, itemId) => {
+    const list = inventoryItems?.[branch]?.[cat] || [];
+    const item = list.find(x => x && x.id === itemId);
+    return item ? (parseFloat(item.stock) || 0) : 0;
+  };
   
   // 클립보드에 복사
   const copyToClipboard = () => {
     const text = materialUsage.map(u => 
-      `${u.material.name}: ${fmt(u.total)}${u.material.unit || '개'}`
+      `${u.name}: ${fmt(u.total)}${u.unit}`
     ).join('\n');
     
     navigator.clipboard.writeText(text).then(() => {
@@ -1510,6 +1854,56 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
     }).catch(() => {
       alert('복사 실패. 직접 메모해주세요.');
     });
+  };
+  
+  // 자동 출고 모달 상태
+  const [showShipModal, setShowShipModal] = useState(false);
+  const [shipDate, setShipDate] = useState(form.date);
+  
+  // form.date 변경 시 shipDate도 동기화
+  useEffect(() => {
+    setShipDate(form.date);
+  }, [form.date]);
+  
+  // 🚀 자연재고관리에 자동 출고 (모달 열기)
+  const handleAutoShipToInventory = () => {
+    if (materialUsage.length === 0) return;
+    setShipDate(form.date);
+    setShowShipModal(true);
+  };
+  
+  // 실제 출고 실행
+  const executeAutoShip = async () => {
+    setShowShipModal(false);
+    setSendingToInventory(true);
+    try {
+      const productSummary = items
+        .filter(it => it.specId && (it.pans || it.boxes))
+        .map(it => `${specLabel(it.specId)} ${isHq ? `${it.pans}판` : `${it.boxes}박스`}`)
+        .join(', ');
+      
+      const memo = `선별포장 자동출고 - ${productSummary}`;
+      
+      const result = await onSendToInventory(materialUsage, memo, shipDate);
+      
+      let msg = `✅ 자동 출고 완료!\n\n`;
+      msg += `📅 출고일: ${shipDate}\n`;
+      msg += `성공: ${result.successes.length}건\n`;
+      result.successes.forEach(s => {
+        msg += `  • ${s.name}: ${fmt(s.qty)}${s.unit} (${fmt(s.before)} → ${fmt(s.after)})\n`;
+      });
+      
+      if (result.errors.length > 0) {
+        msg += `\n⚠️ 실패: ${result.errors.length}건\n`;
+        result.errors.forEach(e => { msg += `  • ${e}\n`; });
+      }
+      
+      alert(msg);
+    } catch (e) {
+      alert('자동 출고 실패: ' + e.message);
+    } finally {
+      setSendingToInventory(false);
+    }
   };
   
   return (
@@ -1672,8 +2066,13 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
             <div className="flex items-center gap-2">
               <Boxes className="w-5 h-5 text-purple-700" />
               <h3 className="font-bold text-purple-900">이 생산에 필요한 부자재</h3>
+              {inventoryConnected && (
+                <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full flex items-center gap-1">
+                  <Link2 className="w-3 h-3" />자연재고관리 연결됨
+                </span>
+              )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button onClick={copyToClipboard} className="px-3 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1">
                 📋 복사
               </button>
@@ -1681,37 +2080,67 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
                 href="https://jayeon-inventory3.netlify.app/" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1"
+                className="px-3 py-1.5 bg-white hover:bg-purple-100 border border-purple-300 rounded-lg text-xs font-semibold text-purple-700 flex items-center gap-1"
               >
                 자연 재고관리 열기 →
               </a>
+              {inventoryConnected && (
+                <button 
+                  onClick={handleAutoShipToInventory} 
+                  disabled={sendingToInventory}
+                  className="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-md"
+                >
+                  {sendingToInventory ? (
+                    <><RefreshCw className="w-3 h-3 animate-spin" />출고 중...</>
+                  ) : (
+                    <><Zap className="w-3 h-3" />🚀 자동 출고</>
+                  )}
+                </button>
+              )}
             </div>
           </div>
           
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {materialUsage.map(u => (
-              <div key={u.material.id} className="bg-white rounded-lg p-2.5 border border-purple-200">
-                <div className="text-xs text-stone-500 mb-0.5">
-                  {MATERIAL_CATEGORIES.find(c => c.id === u.material.category)?.icon || '📦'} {u.material.category ? MATERIAL_CATEGORIES.find(c => c.id === u.material.category)?.name : '기타'}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            {materialUsage.map(u => {
+              const stock = getInventoryStock(u.branch, u.cat, u.inventoryItemId);
+              const isInsufficient = stock < u.total;
+              const willBe = stock - u.total;
+              return (
+                <div key={u.inventoryItemId} className={`bg-white rounded-lg p-2.5 border ${
+                  isInsufficient ? 'border-red-300 bg-red-50' : 'border-purple-200'
+                }`}>
+                  <div className="text-xs text-stone-500 mb-0.5">
+                    {u.branch === 'main' ? '🏢 본점' : '🏪 지점'} · {u.cat === 'sub' ? '부자재' : '공통'}
+                  </div>
+                  <div className="text-sm font-bold text-stone-900">{u.name}</div>
+                  <div className={`text-xl font-bold mt-1 ${isInsufficient ? 'text-red-700' : 'text-purple-700'}`}>
+                    -{fmt(u.total)} <span className="text-sm font-normal">{u.unit}</span>
+                  </div>
+                  {inventoryConnected && (
+                    <div className="text-xs text-stone-500 mt-1">
+                      재고: {fmt(stock)} → <b className={isInsufficient ? 'text-red-600' : 'text-stone-700'}>{fmt(willBe)}</b>
+                      {isInsufficient && <span className="ml-1 text-red-600">⚠️</span>}
+                    </div>
+                  )}
                 </div>
-                <div className="text-sm font-bold text-stone-900">{u.material.name}</div>
-                <div className="text-xl font-bold text-purple-700 mt-1">
-                  {fmt(u.total)} <span className="text-sm font-normal">{u.material.unit || '개'}</span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           
           <div className="mt-3 p-2 bg-white/50 rounded text-xs text-purple-700">
-            💡 <b>사용 방법:</b> 생산 등록 후 [복사] 버튼 → 자연 재고관리 사이트에서 출고 등록 시 참고 / [자연 재고관리 열기] 버튼으로 새 탭에서 바로 사이트 이동
+            {inventoryConnected ? (
+              <>💡 <b>[🚀 자동 출고]</b> 버튼을 누르면 자연 재고관리에 자동으로 출고 등록됩니다. 또는 [📋 복사] 후 수동 입력 가능.</>
+            ) : (
+              <>⚠️ 자연 재고관리에 연결되지 않아 자동 출고 사용 불가. [📋 복사] 후 자연 재고관리 사이트에 직접 입력하세요.</>
+            )}
           </div>
         </div>
       )}
       
       {/* 부자재 매핑 안내 (매핑 없을 때) */}
-      {items.some(it => it.specId) && materialUsage.length === 0 && materials.length > 0 && (
+      {items.some(it => it.specId) && materialUsage.length === 0 && (
         <div className="mt-5 p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-800">
-          ℹ️ 부자재 매핑이 등록되지 않아 사용량이 계산되지 않습니다. <b>부자재 탭 → 매핑 설정</b>에서 등록해주세요.
+          ℹ️ 이 제품은 부자재 매핑이 등록되지 않았습니다. <b>부자재 탭 → 매핑 설정</b>에서 자연 재고관리 부자재와 연결해주세요.
         </div>
       )}
       
@@ -1750,6 +2179,97 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
           )},
         ]}
       />
+      
+      {/* 🚀 자동 출고 확인 모달 */}
+      {showShipModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end md:items-center justify-center p-3" onClick={() => setShowShipModal(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="p-4 md:p-5 bg-gradient-to-r from-purple-600 to-pink-600 text-white">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="font-bold text-lg flex items-center gap-2">
+                  <Zap className="w-5 h-5" />자연 재고관리 자동 출고
+                </h3>
+                <button onClick={() => setShowShipModal(false)} className="p-1 hover:bg-white/20 rounded">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-xs opacity-90">출고 날짜를 확인하고 진행해주세요</p>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 md:p-5">
+              {/* 날짜 선택 */}
+              <div className="mb-4 p-3 bg-purple-50 border-2 border-purple-200 rounded-xl">
+                <label className="block text-sm font-bold text-purple-900 mb-2 flex items-center gap-2">
+                  <Calendar className="w-4 h-4" />출고 날짜
+                </label>
+                <input 
+                  type="date" 
+                  value={shipDate} 
+                  onChange={e => setShipDate(e.target.value)} 
+                  className="input-field text-base font-semibold" 
+                />
+                <div className="text-xs text-purple-700 mt-2">
+                  💡 자연 재고관리에 이 날짜로 출고가 기록됩니다
+                </div>
+              </div>
+              
+              {/* 출고 내역 */}
+              <div className="mb-4">
+                <h4 className="text-sm font-bold text-stone-700 mb-2 flex items-center gap-2">
+                  <Package className="w-4 h-4" />출고 부자재 ({materialUsage.length}건)
+                </h4>
+                <div className="space-y-1.5">
+                  {materialUsage.map(u => {
+                    const stock = getInventoryStock(u.branch, u.cat, u.inventoryItemId);
+                    const willBe = stock - u.total;
+                    const isInsufficient = stock < u.total;
+                    return (
+                      <div key={u.inventoryItemId} className={`p-2.5 rounded-lg border ${
+                        isInsufficient ? 'bg-red-50 border-red-300' : 'bg-stone-50 border-stone-200'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs text-stone-500">
+                              {u.branch === 'main' ? '🏢 본점' : '🏪 지점'} · {u.cat === 'sub' ? '부자재' : '공통'}
+                            </div>
+                            <div className="font-bold text-stone-900 text-sm truncate">{u.name}</div>
+                          </div>
+                          <div className="text-right flex-shrink-0 ml-2">
+                            <div className={`text-base font-bold ${isInsufficient ? 'text-red-700' : 'text-purple-700'}`}>
+                              -{fmt(u.total)} {u.unit}
+                            </div>
+                            <div className="text-xs text-stone-500">
+                              {fmt(stock)} → <b>{fmt(willBe)}</b>
+                            </div>
+                          </div>
+                        </div>
+                        {isInsufficient && (
+                          <div className="mt-1 text-xs text-red-700 font-semibold">⚠️ 재고 부족</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            
+            <div className="p-4 md:p-5 bg-stone-50 border-t border-stone-200 flex gap-2">
+              <button 
+                onClick={() => setShowShipModal(false)} 
+                className="flex-1 py-3 bg-white hover:bg-stone-100 border border-stone-300 rounded-xl font-semibold text-stone-700"
+              >
+                취소
+              </button>
+              <button 
+                onClick={executeAutoShip}
+                className="flex-1 py-3 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold rounded-xl shadow-md flex items-center justify-center gap-2"
+              >
+                <Zap className="w-4 h-4" />출고 진행
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </FormCard>
   );
 }
@@ -1991,6 +2511,11 @@ function HistoryView({ records, site, specLabel, onDelete, onExport, fmt, fmtD }
                         {r.eggMark && <span className="ml-2">난각:{r.eggMark}</span>}
                         {r.vehicle && <span className="ml-2">{r.vehicle}</span>}
                       </div>
+                      {r.layingDates && r.layingDates.length > 0 && (
+                        <div className="text-xs text-amber-700 mt-0.5">
+                          🥚 산란: {r.layingDates.map(d => d.slice(5).replace('-', '/')).join(', ')}
+                        </div>
+                      )}
                     </div>
                   )}
                   {r.type === 'production' && (
@@ -2080,7 +2605,7 @@ function TodayList({ records, title, onDelete, columns }) {
 }
 
 // ============ 🆕 부자재 관리 뷰 ============
-function MaterialsView({ materials, records, site, onSaveMaterials, onSaveRecord, onDeleteRecord, todayDate, hqSpecs, brProducts, productMaterialMap, onSaveMap, fmt }) {
+function MaterialsView({ materials, records, site, onSaveMaterials, onSaveRecord, onDeleteRecord, todayDate, hqSpecs, brProducts, productMaterialMap, onSaveMap, inventoryItems, inventoryConnected, fmt }) {
   const [tab, setTab] = useState('stock'); // stock | in | out | mapping | history
   const [showManager, setShowManager] = useState(false);
   
@@ -2123,71 +2648,58 @@ function MaterialsView({ materials, records, site, onSaveMaterials, onSaveRecord
             <div className="flex items-center gap-2 mb-1 opacity-90 text-sm">
               <Boxes className="w-4 h-4" />부자재 관리 - {isHq ? '본점' : '지점'}
             </div>
-            <h2 className="text-xl font-bold">난좌, 박스, 라벨 등 자재 통합 관리</h2>
+            <h2 className="text-xl font-bold">자연 재고관리 시스템 연동</h2>
+            <div className="flex items-center gap-2 mt-2 text-xs">
+              {inventoryConnected ? (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/30 rounded-full">
+                  <Link2 className="w-3 h-3" />자연 재고관리 연결됨 ✓
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-red-500/30 rounded-full">
+                  <CloudOff className="w-3 h-3" />연결 안 됨
+                </span>
+              )}
+              {inventoryConnected && (
+                <span className="opacity-90">
+                  본점 {(inventoryItems?.main?.sub?.length || 0) + (inventoryItems?.main?.commonSub?.length || 0)}개, 
+                  지점 {(inventoryItems?.branch?.sub?.length || 0) + (inventoryItems?.branch?.commonSub?.length || 0)}개 부자재 동기화
+                </span>
+              )}
+            </div>
           </div>
-          <button onClick={() => setShowManager(true)} 
-            className="px-3 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold flex items-center gap-2">
-            <Settings className="w-4 h-4" />부자재 등록
-          </button>
+          <a 
+            href="https://jayeon-inventory3.netlify.app/" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="px-3 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold flex items-center gap-2"
+          >
+            <Link2 className="w-4 h-4" />자연 재고관리 열기 →
+          </a>
         </div>
       </div>
       
       {/* 탭 */}
       <div className="flex gap-1 bg-white p-1 rounded-xl border border-stone-200 overflow-x-auto">
-        <TabBtn active={tab === 'stock'} onClick={() => setTab('stock')} icon={Layers} label="재고 현황" />
-        <TabBtn active={tab === 'in'} onClick={() => setTab('in')} icon={Plus} label="입고 등록" />
-        <TabBtn active={tab === 'out'} onClick={() => setTab('out')} icon={TrendingUp} label="사용 등록" />
         <TabBtn active={tab === 'mapping'} onClick={() => setTab('mapping')} icon={Hash} label="매핑 설정" />
-        <TabBtn active={tab === 'history'} onClick={() => setTab('history')} icon={Calendar} label="이력" />
+        <TabBtn active={tab === 'stock'} onClick={() => setTab('stock')} icon={Layers} label="자연 재고관리 재고" />
       </div>
       
-      {filteredMaterials.length === 0 && tab !== 'mapping' ? (
-        <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-12 text-center">
-          <Boxes className="w-12 h-12 text-stone-300 mx-auto mb-3" />
-          <h3 className="font-bold text-stone-700 mb-1">아직 등록된 부자재가 없습니다</h3>
-          <p className="text-sm text-stone-500 mb-4">부자재를 먼저 등록해주세요 (난좌, 박스, 라벨 등)</p>
-          <button onClick={() => setShowManager(true)} 
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg flex items-center gap-2 mx-auto">
-            <Plus className="w-4 h-4" />부자재 등록 시작
-          </button>
-        </div>
-      ) : (
-        <>
-          {tab === 'stock' && (
-            <StockView materials={filteredMaterials} groupedMaterials={groupedMaterials} getStock={getStock} fmt={fmt} />
-          )}
-          {tab === 'in' && (
-            <MaterialInForm materials={filteredMaterials} onSave={onSaveRecord} todayDate={todayDate} site={site}
-              todayRecords={records.filter(r => r.type === 'material_in' && r.date === todayDate && r.site === site)}
-              onDelete={onDeleteRecord} fmt={fmt} />
-          )}
-          {tab === 'out' && (
-            <MaterialOutForm materials={filteredMaterials} onSave={onSaveRecord} todayDate={todayDate} site={site}
-              getStock={getStock}
-              todayRecords={records.filter(r => r.type === 'material_out' && r.date === todayDate && r.site === site)}
-              onDelete={onDeleteRecord} fmt={fmt} />
-          )}
-          {tab === 'mapping' && (
-            <MappingView 
-              site={site} hqSpecs={hqSpecs} brProducts={brProducts}
-              materials={materials}
-              productMaterialMap={productMaterialMap || {}}
-              onSaveMap={onSaveMap}
-              fmt={fmt}
-            />
-          )}
-          {tab === 'history' && (
-            <MaterialHistory materials={filteredMaterials} records={records.filter(r => 
-              (r.type === 'material_in' || r.type === 'material_out') && r.site === site
-            )} onDelete={onDeleteRecord} fmt={fmt} />
-          )}
-        </>
+      {tab === 'mapping' && (
+        <MappingView 
+          site={site} hqSpecs={hqSpecs} brProducts={brProducts}
+          inventoryItems={inventoryItems}
+          inventoryConnected={inventoryConnected}
+          productMaterialMap={productMaterialMap || {}}
+          onSaveMap={onSaveMap}
+          fmt={fmt}
+        />
       )}
       
-      {showManager && (
-        <MaterialMasterManager 
-          materials={materials} onSave={onSaveMaterials}
-          onClose={() => setShowManager(false)}
+      {tab === 'stock' && (
+        <InventoryStockView 
+          inventoryItems={inventoryItems}
+          inventoryConnected={inventoryConnected}
+          fmt={fmt}
         />
       )}
     </div>
@@ -2204,52 +2716,54 @@ function TabBtn({ active, onClick, icon: Icon, label }) {
   );
 }
 
-// 재고 현황
-function StockView({ materials, groupedMaterials, getStock, fmt }) {
+// 🆕 자연재고관리 재고 현황 표시
+function InventoryStockView({ inventoryItems, inventoryConnected, fmt }) {
+  if (!inventoryConnected) {
+    return (
+      <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-12 text-center">
+        <CloudOff className="w-12 h-12 text-stone-300 mx-auto mb-3" />
+        <h3 className="font-bold text-stone-700 mb-1">자연 재고관리에 연결되지 않았습니다</h3>
+        <p className="text-sm text-stone-500">잠시 후 다시 시도해주세요</p>
+      </div>
+    );
+  }
+  
+  const sections = [
+    { title: '본점 - 부자재 (sub)', items: inventoryItems?.main?.sub || [], branch: 'main', cat: 'sub' },
+    { title: '본점 - 공통 부자재 (commonSub)', items: inventoryItems?.main?.commonSub || [], branch: 'main', cat: 'commonSub' },
+    { title: '지점 - 부자재 (sub)', items: inventoryItems?.branch?.sub || [], branch: 'branch', cat: 'sub' },
+    { title: '지점 - 공통 부자재 (commonSub)', items: inventoryItems?.branch?.commonSub || [], branch: 'branch', cat: 'commonSub' },
+  ];
+  
   return (
     <div className="space-y-4">
-      {MATERIAL_CATEGORIES.map(cat => {
-        const items = groupedMaterials[cat.id] || [];
-        if (items.length === 0) return null;
-        
+      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+        💡 자연 재고관리 사이트의 실시간 재고입니다. 변경 사항은 자연 재고관리에서 직접 입력하세요.
+      </div>
+      
+      {sections.map((sec, sIdx) => {
+        if (sec.items.length === 0) return null;
         return (
-          <div key={cat.id} className="bg-white rounded-xl border border-stone-200 p-4">
-            <h3 className="font-bold text-stone-900 mb-3 flex items-center gap-2">
-              <span className="text-lg">{cat.icon}</span>{cat.name}
-            </h3>
+          <div key={sIdx} className="bg-white rounded-xl border border-stone-200 p-4">
+            <h3 className="font-bold text-stone-900 mb-3">{sec.title}</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-              {items.map(m => {
-                const stock = getStock(m.id);
-                const minStock = parseFloat(m.minStock) || 0;
-                const isLow = minStock > 0 && stock <= minStock;
-                const isVeryLow = stock <= 0;
-                
+              {sec.items.filter(it => it).map((it, idx) => {
+                const stock = parseFloat(it.stock) || 0;
+                const isOut = stock <= 0;
+                const isLow = stock > 0 && stock < 10;
                 return (
-                  <div key={m.id} className={`p-3 rounded-lg border-2 ${
-                    isVeryLow ? 'bg-red-50 border-red-300' :
+                  <div key={`${sec.branch}_${sec.cat}_${idx}`} className={`p-3 rounded-lg border-2 ${
+                    isOut ? 'bg-red-50 border-red-300' :
                     isLow ? 'bg-amber-50 border-amber-300' :
                     'bg-stone-50 border-stone-200'
                   }`}>
-                    <div className="flex justify-between items-start mb-1">
-                      <div>
-                        <div className="font-bold text-stone-900 text-sm">{m.name}</div>
-                        {m.spec && <div className="text-xs text-stone-500">{m.spec}</div>}
-                      </div>
-                      {isVeryLow ? <span className="text-xs bg-red-500 text-white px-1.5 py-0.5 rounded">없음</span>
-                       : isLow ? <span className="text-xs bg-amber-500 text-white px-1.5 py-0.5 rounded">부족</span>
-                       : <span className="text-xs bg-green-500 text-white px-1.5 py-0.5 rounded">정상</span>}
-                    </div>
-                    <div className={`text-2xl font-bold ${
-                      isVeryLow ? 'text-red-600' : isLow ? 'text-amber-700' : 'text-stone-900'
+                    <div className="text-xs text-stone-500 mb-0.5 font-mono">{it.id}</div>
+                    <div className="font-bold text-stone-900 text-sm">{it.name}</div>
+                    <div className={`text-xl font-bold mt-1 ${
+                      isOut ? 'text-red-600' : isLow ? 'text-amber-700' : 'text-stone-900'
                     }`}>
-                      {fmt(stock)} <span className="text-xs font-normal">{m.unit || '개'}</span>
+                      {fmt(stock)} <span className="text-xs font-normal">{it.unit || 'EA'}</span>
                     </div>
-                    {m.supplier && (
-                      <div className="text-xs text-stone-500 mt-1">📞 {m.supplier}</div>
-                    )}
-                    {minStock > 0 && (
-                      <div className="text-xs text-stone-400 mt-0.5">최소 {fmt(minStock)}{m.unit || '개'}</div>
-                    )}
                   </div>
                 );
               })}
@@ -2261,250 +2775,36 @@ function StockView({ materials, groupedMaterials, getStock, fmt }) {
   );
 }
 
-// 부자재 입고
-function MaterialInForm({ materials, onSave, todayDate, site, todayRecords, onDelete, fmt }) {
-  const [form, setForm] = useState({
-    date: todayDate, materialId: '', quantity: '', supplier: '', price: '', note: ''
-  });
-  
-  const handleSubmit = async () => {
-    if (!form.materialId || !form.quantity) {
-      alert('부자재와 수량을 선택/입력해주세요.'); return;
-    }
-    const material = materials.find(m => m.id === form.materialId);
-    const record = {
-      id: `matin_${Date.now()}`, type: 'material_in', site,
-      date: form.date,
-      materialId: form.materialId, materialName: material?.name || '',
-      materialUnit: material?.unit || '개',
-      quantity: parseFloat(form.quantity),
-      supplier: form.supplier || material?.supplier || '',
-      price: parseInt(form.price) || 0,
-      note: form.note,
-      createdAt: new Date().toISOString()
-    };
-    if (await onSave(record)) {
-      setForm({ ...form, materialId: '', quantity: '', supplier: '', price: '', note: '' });
-      alert(`입고 등록 완료\n${material?.name}: ${form.quantity}${material?.unit || '개'}`);
-    }
-  };
-  
-  return (
-    <FormCard title="부자재 입고 등록" icon={Plus} color="blue">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="입고 날짜">
-          <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
-        </Field>
-        <Field label="부자재" required>
-          <select value={form.materialId} onChange={e => setForm({...form, materialId: e.target.value})} className="input-field">
-            <option value="">선택</option>
-            {MATERIAL_CATEGORIES.map(cat => {
-              const items = materials.filter(m => (m.category || 'etc') === cat.id);
-              if (items.length === 0) return null;
-              return (
-                <optgroup key={cat.id} label={`${cat.icon} ${cat.name}`}>
-                  {items.map(m => <option key={m.id} value={m.id}>{m.name}{m.spec ? ` (${m.spec})` : ''}</option>)}
-                </optgroup>
-              );
-            })}
-          </select>
-        </Field>
-        <Field label="입고 수량" required>
-          <div className="flex gap-2">
-            <input type="number" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} placeholder="0" className="input-field flex-1 text-lg font-semibold" inputMode="numeric" />
-            <span className="px-3 py-2 bg-stone-100 rounded-lg text-stone-700 text-sm flex items-center font-medium">
-              {materials.find(m => m.id === form.materialId)?.unit || '개'}
-            </span>
-          </div>
-        </Field>
-        <Field label="공급처">
-          <input type="text" value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})} placeholder={materials.find(m => m.id === form.materialId)?.supplier || '예: 한솔제지'} className="input-field" />
-        </Field>
-        <Field label="총 금액 (원, 선택)">
-          <input type="number" value={form.price} onChange={e => setForm({...form, price: e.target.value})} placeholder="예: 250000" className="input-field" inputMode="numeric" />
-        </Field>
-        <Field label="비고">
-          <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택사항" className="input-field" />
-        </Field>
-      </div>
-      
-      <button onClick={handleSubmit} className="w-full mt-5 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl flex items-center justify-center gap-2">
-        <Plus className="w-5 h-5" />입고 등록
-      </button>
-      
-      <TodayList records={todayRecords} title="오늘 입고 내역" onDelete={onDelete}
-        columns={[
-          { header: '부자재', render: r => <span className="font-medium">{r.materialName}</span> },
-          { header: '공급처', render: r => <span className="text-xs text-stone-600">{r.supplier || '-'}</span> },
-          { header: '금액', render: r => <span className="text-xs text-stone-600">{r.price > 0 ? `${fmt(r.price)}원` : '-'}</span> },
-          { header: '수량', align: 'right', render: r => <span className="font-bold text-blue-600">+{fmt(r.quantity)}{r.materialUnit}</span> },
-        ]}
-      />
-    </FormCard>
-  );
-}
-
-// 부자재 사용 (수동)
-function MaterialOutForm({ materials, onSave, todayDate, site, getStock, todayRecords, onDelete, fmt }) {
-  const [form, setForm] = useState({
-    date: todayDate, materialId: '', quantity: '', purpose: '', note: ''
-  });
-  
-  const selectedMaterial = materials.find(m => m.id === form.materialId);
-  const currentStock = form.materialId ? getStock(form.materialId) : 0;
-  
-  const handleSubmit = async () => {
-    if (!form.materialId || !form.quantity) {
-      alert('부자재와 수량을 선택/입력해주세요.'); return;
-    }
-    const qty = parseFloat(form.quantity);
-    if (qty > currentStock) {
-      if (!confirm(`재고(${currentStock}${selectedMaterial?.unit})보다 많은 양(${qty}${selectedMaterial?.unit})을 사용합니다.\n그래도 진행하시겠습니까?`)) return;
-    }
-    
-    const record = {
-      id: `matout_${Date.now()}`, type: 'material_out', site,
-      date: form.date,
-      materialId: form.materialId, materialName: selectedMaterial?.name || '',
-      materialUnit: selectedMaterial?.unit || '개',
-      quantity: qty,
-      purpose: form.purpose,
-      note: form.note,
-      createdAt: new Date().toISOString()
-    };
-    if (await onSave(record)) {
-      setForm({ ...form, materialId: '', quantity: '', purpose: '', note: '' });
-      alert(`사용 등록 완료\n${selectedMaterial?.name}: -${qty}${selectedMaterial?.unit}`);
-    }
-  };
-  
-  return (
-    <FormCard title="부자재 사용 등록 (수동)" icon={TrendingUp} color="amber">
-      <div className="mb-4 p-3 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-600">
-        💡 수동으로 부자재 사용을 기록합니다. (Phase 2에서 생산 입력 시 자동 차감 추가 예정)
-      </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="사용 날짜">
-          <input type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} className="input-field" />
-        </Field>
-        <Field label="부자재" required>
-          <select value={form.materialId} onChange={e => setForm({...form, materialId: e.target.value})} className="input-field">
-            <option value="">선택</option>
-            {MATERIAL_CATEGORIES.map(cat => {
-              const items = materials.filter(m => (m.category || 'etc') === cat.id);
-              if (items.length === 0) return null;
-              return (
-                <optgroup key={cat.id} label={`${cat.icon} ${cat.name}`}>
-                  {items.map(m => {
-                    const stock = getStock(m.id);
-                    return <option key={m.id} value={m.id}>{m.name} (재고 {fmt(stock)}{m.unit || '개'})</option>;
-                  })}
-                </optgroup>
-              );
-            })}
-          </select>
-        </Field>
-        <Field label="사용 수량" required>
-          <div className="flex gap-2">
-            <input type="number" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} placeholder="0" className="input-field flex-1 text-lg font-semibold" inputMode="numeric" />
-            <span className="px-3 py-2 bg-stone-100 rounded-lg text-stone-700 text-sm flex items-center font-medium">
-              {selectedMaterial?.unit || '개'}
-            </span>
-          </div>
-          {form.materialId && (
-            <div className="text-xs text-stone-500 mt-1">현재 재고: <b>{fmt(currentStock)}{selectedMaterial?.unit}</b></div>
-          )}
-        </Field>
-        <Field label="용도/목적">
-          <input type="text" value={form.purpose} onChange={e => setForm({...form, purpose: e.target.value})} placeholder="예: 청정원 25구 생산" className="input-field" />
-        </Field>
-        <Field label="비고" className="md:col-span-2">
-          <input type="text" value={form.note} onChange={e => setForm({...form, note: e.target.value})} placeholder="선택사항" className="input-field" />
-        </Field>
-      </div>
-      
-      <button onClick={handleSubmit} className="w-full mt-5 py-3.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl flex items-center justify-center gap-2">
-        <TrendingUp className="w-5 h-5" />사용 등록
-      </button>
-      
-      <TodayList records={todayRecords} title="오늘 사용 내역" onDelete={onDelete}
-        columns={[
-          { header: '부자재', render: r => <span className="font-medium">{r.materialName}</span> },
-          { header: '용도', render: r => <span className="text-xs text-stone-600">{r.purpose || '-'}</span> },
-          { header: '수량', align: 'right', render: r => <span className="font-bold text-amber-600">-{fmt(r.quantity)}{r.materialUnit}</span> },
-        ]}
-      />
-    </FormCard>
-  );
-}
-
-// 부자재 이력
-function MaterialHistory({ materials, records, onDelete, fmt }) {
-  return (
-    <div className="bg-white rounded-xl border border-stone-200 overflow-hidden">
-      <div className="p-4 border-b border-stone-200">
-        <h2 className="font-bold text-stone-900 flex items-center gap-2">
-          <Calendar className="w-5 h-5 text-purple-600" />부자재 입출고 이력 ({records.length}건)
-        </h2>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead className="bg-stone-50 text-xs text-stone-600 uppercase">
-            <tr>
-              <th className="py-3 px-3 text-left">날짜</th>
-              <th className="py-3 px-3 text-left">구분</th>
-              <th className="py-3 px-3 text-left">부자재</th>
-              <th className="py-3 px-3 text-left">상세</th>
-              <th className="py-3 px-3 text-right">수량</th>
-              <th className="py-3 px-3"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...records].sort((a,b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt)).map(r => (
-              <tr key={r.id} className="border-t border-stone-100 hover:bg-stone-50">
-                <td className="py-3 px-3 text-sm">{r.date}</td>
-                <td className="py-3 px-3">
-                  {r.type === 'material_in' 
-                    ? <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded">입고</span>
-                    : <span className="px-2 py-1 bg-amber-100 text-amber-700 text-xs font-medium rounded">사용</span>}
-                </td>
-                <td className="py-3 px-3 text-sm font-medium">{r.materialName}</td>
-                <td className="py-3 px-3 text-xs text-stone-600">
-                  {r.type === 'material_in' 
-                    ? `${r.supplier || ''}${r.price > 0 ? ` · ${fmt(r.price)}원` : ''}`
-                    : r.purpose || '-'}
-                </td>
-                <td className="py-3 px-3 text-right">
-                  <span className={`font-bold ${r.type === 'material_in' ? 'text-blue-600' : 'text-amber-600'}`}>
-                    {r.type === 'material_in' ? '+' : '-'}{fmt(r.quantity)}{r.materialUnit || '개'}
-                  </span>
-                </td>
-                <td className="py-3 px-3">
-                  <button onClick={() => onDelete(r)} className="text-stone-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
-                </td>
-              </tr>
-            ))}
-            {records.length === 0 && <tr><td colSpan={6} className="py-12 text-center text-stone-400">기록이 없습니다</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// 🆕 제품-부자재 매핑 설정
-function MappingView({ site, hqSpecs, brProducts, materials, productMaterialMap, onSaveMap, fmt }) {
+// 🆕 제품 ↔ 자연재고관리 부자재 매핑
+function MappingView({ site, hqSpecs, brProducts, inventoryItems, inventoryConnected, productMaterialMap, onSaveMap, fmt }) {
   const isHq = site === 'hq';
   const products = isHq ? hqSpecs : brProducts;
-  const filteredMaterials = materials.filter(m => 
-    !m.siteScope || m.siteScope === 'both' || m.siteScope === site
-  );
+  
+  // 자연재고관리 부자재 평탄화 (선택용)
+  // [{ id, name, unit, branch (main|branch), cat (sub|commonSub) }]
+  const allInventoryItems = useMemo(() => {
+    const items = [];
+    ['main', 'branch'].forEach(br => {
+      ['sub', 'commonSub'].forEach(cat => {
+        const list = inventoryItems?.[br]?.[cat] || [];
+        list.filter(x => x).forEach(it => {
+          items.push({
+            id: it.id,
+            name: it.name,
+            unit: it.unit || 'EA',
+            branch: br,
+            cat: cat,
+            stock: it.stock || 0
+          });
+        });
+      });
+    });
+    return items;
+  }, [inventoryItems]);
   
   const [selectedProductId, setSelectedProductId] = useState('');
-  const [editing, setEditing] = useState([]); // 현재 편집 중인 매핑들
+  const [editing, setEditing] = useState([]);
   
-  // 선택된 제품의 매핑 로드
   useEffect(() => {
     if (selectedProductId) {
       setEditing(productMaterialMap[selectedProductId] || []);
@@ -2514,7 +2814,7 @@ function MappingView({ site, hqSpecs, brProducts, materials, productMaterialMap,
   }, [selectedProductId, productMaterialMap]);
   
   const addMapping = () => {
-    setEditing([...editing, { materialId: '', quantity: '' }]);
+    setEditing([...editing, { inventoryItemId: '', quantity: '' }]);
   };
   
   const updateMapping = (idx, field, value) => {
@@ -2526,16 +2826,25 @@ function MappingView({ site, hqSpecs, brProducts, materials, productMaterialMap,
   };
   
   const saveMapping = async () => {
-    const validMappings = editing.filter(m => m.materialId && m.quantity);
-    const newMap = { ...productMaterialMap };
+    const validMappings = editing
+      .filter(m => m.inventoryItemId && m.quantity)
+      .map(m => {
+        const item = allInventoryItems.find(x => x.id === m.inventoryItemId);
+        return {
+          inventoryItemId: m.inventoryItemId,
+          name: item?.name || '',
+          unit: item?.unit || 'EA',
+          branch: item?.branch || 'main',
+          cat: item?.cat || 'sub',
+          quantity: parseFloat(m.quantity)
+        };
+      });
     
+    const newMap = { ...productMaterialMap };
     if (validMappings.length === 0) {
       delete newMap[selectedProductId];
     } else {
-      newMap[selectedProductId] = validMappings.map(m => ({
-        materialId: m.materialId,
-        quantity: parseFloat(m.quantity)
-      }));
+      newMap[selectedProductId] = validMappings;
     }
     
     await onSaveMap(newMap);
@@ -2544,120 +2853,138 @@ function MappingView({ site, hqSpecs, brProducts, materials, productMaterialMap,
   
   const selectedProduct = products.find(p => p.id === selectedProductId);
   
+  if (!inventoryConnected) {
+    return (
+      <div className="bg-white rounded-xl border-2 border-dashed border-stone-300 p-12 text-center">
+        <CloudOff className="w-12 h-12 text-stone-300 mx-auto mb-3" />
+        <h3 className="font-bold text-stone-700 mb-1">자연 재고관리에 연결되지 않았습니다</h3>
+        <p className="text-sm text-stone-500">잠시 후 다시 시도해주세요</p>
+      </div>
+    );
+  }
+  
   return (
     <div className="bg-white rounded-xl border border-stone-200 p-5">
       <div className="mb-4">
         <h3 className="font-bold text-stone-900 flex items-center gap-2 mb-1">
-          <Hash className="w-5 h-5 text-purple-600" />제품 ↔ 부자재 매핑 설정
+          <Hash className="w-5 h-5 text-purple-600" />제품 ↔ 자연 재고관리 부자재 매핑
         </h3>
         <p className="text-sm text-stone-600">
-          각 제품을 1{isHq ? '판' : '박스'} 만들 때 들어가는 부자재 양을 등록하세요. 
-          생산 입력 시 <b>자동 계산</b>됩니다.
+          각 제품을 1{isHq ? '판' : '박스'} 만들 때 사용되는 부자재를 자연 재고관리에서 직접 선택하세요.
+          생산 입력 시 <b>자동 계산 + 자동 출고</b>됩니다.
         </p>
       </div>
       
-      {filteredMaterials.length === 0 ? (
-        <div className="p-6 bg-amber-50 border border-amber-200 rounded-lg text-center">
-          <p className="text-sm text-amber-800">먼저 <b>부자재 등록</b>을 해주세요</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* 좌측: 제품 목록 */}
-          <div className="md:col-span-1">
-            <div className="text-xs font-bold text-stone-500 mb-2 uppercase">제품 선택</div>
-            <div className="bg-stone-50 rounded-lg p-2 max-h-96 overflow-y-auto">
-              {isHq ? (
-                ['왕', '특', '대', '중'].map(grade => {
-                  const items = products.filter(p => p.grade === grade);
-                  if (items.length === 0) return null;
-                  return (
-                    <div key={grade} className="mb-2">
-                      <div className="text-xs font-bold text-stone-600 px-2 py-1">{grade}란</div>
-                      {items.map(p => {
-                        const hasMapping = (productMaterialMap[p.id] || []).length > 0;
-                        return (
-                          <button key={p.id} onClick={() => setSelectedProductId(p.id)}
-                            className={`w-full text-left px-2 py-1.5 rounded text-sm transition flex items-center justify-between ${
-                              selectedProductId === p.id ? 'bg-purple-600 text-white' : 'hover:bg-white'
-                            }`}>
-                            <span>{p.name}</span>
-                            {hasMapping && <span className={`text-xs px-1 rounded ${
-                              selectedProductId === p.id ? 'bg-white/30' : 'bg-purple-100 text-purple-700'
-                            }`}>매핑됨</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  );
-                })
-              ) : (
-                [...new Set(products.map(p => p.brand))].map(brand => {
-                  const items = products.filter(p => p.brand === brand);
-                  return (
-                    <div key={brand} className="mb-2">
-                      <div className="text-xs font-bold text-stone-600 px-2 py-1">{brand}</div>
-                      {items.map(p => {
-                        const hasMapping = (productMaterialMap[p.id] || []).length > 0;
-                        return (
-                          <button key={p.id} onClick={() => setSelectedProductId(p.id)}
-                            className={`w-full text-left px-2 py-1.5 rounded text-sm transition flex items-center justify-between ${
-                              selectedProductId === p.id ? 'bg-purple-600 text-white' : 'hover:bg-white'
-                            }`}>
-                            <span className="text-xs truncate">{p.name}</span>
-                            {hasMapping && <span className={`text-xs px-1 rounded ml-1 flex-shrink-0 ${
-                              selectedProductId === p.id ? 'bg-white/30' : 'bg-purple-100 text-purple-700'
-                            }`}>✓</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-          
-          {/* 우측: 매핑 편집 */}
-          <div className="md:col-span-2">
-            {!selectedProductId ? (
-              <div className="bg-stone-50 rounded-lg p-12 text-center">
-                <p className="text-stone-500">← 좌측에서 제품을 선택하세요</p>
-              </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* 좌측: 제품 목록 */}
+        <div className="md:col-span-1">
+          <div className="text-xs font-bold text-stone-500 mb-2 uppercase">제품 선택</div>
+          <div className="bg-stone-50 rounded-lg p-2 max-h-[600px] overflow-y-auto">
+            {isHq ? (
+              ['왕', '특', '대', '중'].map(grade => {
+                const items = products.filter(p => p.grade === grade);
+                if (items.length === 0) return null;
+                return (
+                  <div key={grade} className="mb-2">
+                    <div className="text-xs font-bold text-stone-600 px-2 py-1">{grade}란</div>
+                    {items.map(p => {
+                      const hasMapping = (productMaterialMap[p.id] || []).length > 0;
+                      return (
+                        <button key={p.id} onClick={() => setSelectedProductId(p.id)}
+                          className={`w-full text-left px-2 py-1.5 rounded text-sm transition flex items-center justify-between ${
+                            selectedProductId === p.id ? 'bg-purple-600 text-white' : 'hover:bg-white'
+                          }`}>
+                          <span>{p.name}</span>
+                          {hasMapping && <span className={`text-xs px-1 rounded ${
+                            selectedProductId === p.id ? 'bg-white/30' : 'bg-purple-100 text-purple-700'
+                          }`}>{(productMaterialMap[p.id] || []).length}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })
             ) : (
-              <div>
-                <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                  <div className="text-xs text-purple-600 mb-1">선택된 제품</div>
-                  <div className="font-bold text-purple-900">
-                    {selectedProduct?.brand ? `${selectedProduct.brand} - ` : ''}{selectedProduct?.name}
+              [...new Set(products.map(p => p.brand))].map(brand => {
+                const items = products.filter(p => p.brand === brand);
+                return (
+                  <div key={brand} className="mb-2">
+                    <div className="text-xs font-bold text-stone-600 px-2 py-1">{brand}</div>
+                    {items.map(p => {
+                      const hasMapping = (productMaterialMap[p.id] || []).length > 0;
+                      return (
+                        <button key={p.id} onClick={() => setSelectedProductId(p.id)}
+                          className={`w-full text-left px-2 py-1.5 rounded text-sm transition flex items-center justify-between ${
+                            selectedProductId === p.id ? 'bg-purple-600 text-white' : 'hover:bg-white'
+                          }`}>
+                          <span className="text-xs truncate">{p.name}</span>
+                          {hasMapping && <span className={`text-xs px-1 rounded ml-1 flex-shrink-0 ${
+                            selectedProductId === p.id ? 'bg-white/30' : 'bg-purple-100 text-purple-700'
+                          }`}>{(productMaterialMap[p.id] || []).length}</span>}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div className="text-xs text-stone-600 mt-1">
-                    아래 매핑은 <b>1{isHq ? '판' : '박스'} 생산 시</b> 사용되는 부자재 양입니다.
-                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+        
+        {/* 우측: 매핑 편집 */}
+        <div className="md:col-span-2">
+          {!selectedProductId ? (
+            <div className="bg-stone-50 rounded-lg p-12 text-center">
+              <p className="text-stone-500">← 좌측에서 제품을 선택하세요</p>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                <div className="text-xs text-purple-600 mb-1">선택된 제품</div>
+                <div className="font-bold text-purple-900">
+                  {selectedProduct?.brand ? `${selectedProduct.brand} - ` : ''}{selectedProduct?.name}
                 </div>
-                
-                {editing.length === 0 ? (
-                  <div className="text-center py-6 text-stone-400 text-sm">
-                    아직 매핑이 없습니다. 아래 버튼을 클릭해서 추가하세요.
-                  </div>
-                ) : (
-                  <div className="space-y-2 mb-3">
-                    {editing.map((m, idx) => (
+                <div className="text-xs text-stone-600 mt-1">
+                  아래 매핑은 <b>1{isHq ? '판' : '박스'} 생산 시</b> 사용되는 부자재 양입니다.
+                </div>
+              </div>
+              
+              {editing.length === 0 ? (
+                <div className="text-center py-6 text-stone-400 text-sm">
+                  아직 매핑이 없습니다. 아래 버튼을 클릭해서 추가하세요.
+                </div>
+              ) : (
+                <div className="space-y-2 mb-3">
+                  {editing.map((m, idx) => {
+                    const selectedItem = allInventoryItems.find(x => x.id === m.inventoryItemId);
+                    return (
                       <div key={idx} className="flex gap-2 items-center bg-stone-50 p-2 rounded-lg">
                         <select 
-                          value={m.materialId} 
-                          onChange={e => updateMapping(idx, 'materialId', e.target.value)}
+                          value={m.inventoryItemId} 
+                          onChange={e => updateMapping(idx, 'inventoryItemId', e.target.value)}
                           className="input-field flex-1"
                         >
-                          <option value="">부자재 선택</option>
-                          {MATERIAL_CATEGORIES.map(cat => {
-                            const items = filteredMaterials.filter(mat => (mat.category || 'etc') === cat.id);
-                            if (items.length === 0) return null;
-                            return (
-                              <optgroup key={cat.id} label={`${cat.icon} ${cat.name}`}>
-                                {items.map(mat => <option key={mat.id} value={mat.id}>{mat.name}</option>)}
-                              </optgroup>
-                            );
-                          })}
+                          <option value="">자연 재고관리에서 부자재 선택</option>
+                          <optgroup label="📦 본점 - 부자재 (sub)">
+                            {allInventoryItems.filter(x => x.branch === 'main' && x.cat === 'sub').map(x => 
+                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
+                            )}
+                          </optgroup>
+                          <optgroup label="🔧 본점 - 공통 부자재 (commonSub)">
+                            {allInventoryItems.filter(x => x.branch === 'main' && x.cat === 'commonSub').map(x => 
+                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
+                            )}
+                          </optgroup>
+                          <optgroup label="📦 지점 - 부자재 (sub)">
+                            {allInventoryItems.filter(x => x.branch === 'branch' && x.cat === 'sub').map(x => 
+                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
+                            )}
+                          </optgroup>
+                          <optgroup label="🔧 지점 - 공통 부자재 (commonSub)">
+                            {allInventoryItems.filter(x => x.branch === 'branch' && x.cat === 'commonSub').map(x => 
+                              <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>
+                            )}
+                          </optgroup>
                         </select>
                         <input 
                           type="number" 
@@ -2669,49 +2996,50 @@ function MappingView({ site, hqSpecs, brProducts, materials, productMaterialMap,
                           inputMode="decimal"
                         />
                         <span className="text-xs text-stone-500 whitespace-nowrap">
-                          {filteredMaterials.find(mat => mat.id === m.materialId)?.unit || '개'}/{isHq ? '판' : '박스'}
+                          {selectedItem?.unit || 'EA'}/{isHq ? '판' : '박스'}
                         </span>
                         <button onClick={() => removeMapping(idx)} className="text-stone-400 hover:text-red-500 p-1">
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
-                    ))}
+                    );
+                  })}
+                </div>
+              )}
+              
+              <button onClick={addMapping} className="w-full py-2 border-2 border-dashed border-purple-300 hover:border-purple-500 hover:bg-purple-50 rounded-lg text-sm font-medium text-purple-600 transition flex items-center justify-center gap-2">
+                <Plus className="w-4 h-4" />부자재 추가
+              </button>
+              
+              <button onClick={saveMapping} className="w-full mt-3 py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl flex items-center justify-center gap-2">
+                💾 매핑 저장
+              </button>
+              
+              {/* 미리보기 */}
+              {editing.filter(m => m.inventoryItemId && m.quantity).length > 0 && (
+                <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="text-xs font-bold text-green-700 mb-2">예시: 10{isHq ? '판' : '박스'} 생산 시</div>
+                  <div className="space-y-1 text-sm">
+                    {editing.filter(m => m.inventoryItemId && m.quantity).map((m, i) => {
+                      const item = allInventoryItems.find(x => x.id === m.inventoryItemId);
+                      return (
+                        <div key={i} className="flex justify-between">
+                          <span>{item?.name}</span>
+                          <span className="font-bold">{fmt(parseFloat(m.quantity) * 10)}{item?.unit || 'EA'}</span>
+                        </div>
+                      );
+                    })}
                   </div>
-                )}
-                
-                <button onClick={addMapping} className="w-full py-2 border-2 border-dashed border-purple-300 hover:border-purple-500 hover:bg-purple-50 rounded-lg text-sm font-medium text-purple-600 transition flex items-center justify-center gap-2">
-                  <Plus className="w-4 h-4" />부자재 추가
-                </button>
-                
-                <button onClick={saveMapping} className="w-full mt-3 py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl flex items-center justify-center gap-2">
-                  💾 매핑 저장
-                </button>
-                
-                {/* 미리보기 */}
-                {editing.filter(m => m.materialId && m.quantity).length > 0 && (
-                  <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                    <div className="text-xs font-bold text-green-700 mb-2">예시 미리보기 (10{isHq ? '판' : '박스'} 생산 시)</div>
-                    <div className="space-y-1 text-sm">
-                      {editing.filter(m => m.materialId && m.quantity).map((m, i) => {
-                        const mat = filteredMaterials.find(mat => mat.id === m.materialId);
-                        return (
-                          <div key={i} className="flex justify-between">
-                            <span>{mat?.name}</span>
-                            <span className="font-bold">{fmt(parseFloat(m.quantity) * 10)}{mat?.unit || '개'}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
+
 
 
 // 부자재 마스터 등록 모달
