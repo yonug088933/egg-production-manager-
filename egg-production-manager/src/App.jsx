@@ -12,13 +12,12 @@ import {
 
 // ============ Firebase 설정 (선별포장) ============
 const firebaseConfig = {
-  apiKey: "AIzaSyBjKFjr_-gtbRdroan1zwkOfUVmhKGxMVs",
-  authDomain: "egg-production-manager.firebaseapp.com",
-  projectId: "egg-production-manager",
-  storageBucket: "egg-production-manager.firebasestorage.app",
-  messagingSenderId: "891063225076",
-  appId: "1:891063225076:web:2e1fd535c323b096e8eca1",
-  measurementId: "G-4BQTZ8YFRJ"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 const app = initializeApp(firebaseConfig);
@@ -369,27 +368,43 @@ export default function EggProductionManager() {
           continue;
         }
         
-        const before = parseFloat(currentArray[idx].stock) || 0;
-        const after = before - item.qty;
+        // 🆕 NaN 방어 - 모든 값을 안전하게 숫자로 변환
+        const beforeRaw = currentArray[idx].stock;
+        const before = Number(beforeRaw) || 0;
+        const qty = Number(item.qty) || 0;
         
-        // 2. 재고 업데이트
+        // qty가 0이면 출고 의미 없음
+        if (qty <= 0) {
+          errors.push(`${item.name}: 출고 수량이 0입니다 (매핑 확인 필요)`);
+          continue;
+        }
+        
+        const after = before - qty;
+        
+        // 결과가 NaN이면 안전 처리
+        if (isNaN(after)) {
+          errors.push(`${item.name}: 계산 오류 (재고: ${beforeRaw}, 수량: ${item.qty})`);
+          continue;
+        }
+        
+        // 2. 재고 업데이트 (숫자로 확실하게)
         await dbUpdate(
           dbRef(inventoryDb, `${itemPath}/${idx}`),
-          { stock: after }
+          { stock: Number(after) }
         );
         
         // 3. logs에 기록 추가
         const logId = `${Date.now()}_${Math.random()}`;
         const logEntry = {
-          after,
-          before,
+          after: Number(after),
+          before: Number(before),
           branch: item.branch,
           cat: item.cat,
           date: today,
           id: logId,
           name: item.name,
           note: memo || '선별포장 시스템 자동 출고',
-          qty: item.qty,
+          qty: Number(qty),
           type: '출고',
           unit: item.unit || 'EA',
           writer: '선별포장 자동'
@@ -398,7 +413,7 @@ export default function EggProductionManager() {
         // logs는 배열이므로 push로 추가
         await dbPush(dbRef(inventoryDb, 'logs'), logEntry);
         
-        successes.push({ ...item, before, after });
+        successes.push({ ...item, before, after, qty });
       } catch (e) {
         errors.push(`${item.name}: ${e.message}`);
       }
@@ -1956,7 +1971,17 @@ function ProductionForm({ form, setForm, items, onAddItem, onUpdateItem, onRemov
       
       const memo = `선별포장 자동출고 - ${productSummary}`;
       
-      const result = await onSendToInventory(materialUsage, memo, shipDate);
+      // 🔧 materialUsage의 total을 qty로 변환해서 전달
+      const usageForSend = materialUsage.map(u => ({
+        inventoryItemId: u.inventoryItemId,
+        name: u.name,
+        unit: u.unit,
+        branch: u.branch,
+        cat: u.cat,
+        qty: Number(u.total) || 0  // total → qty로 변환
+      }));
+      
+      const result = await onSendToInventory(usageForSend, memo, shipDate);
       
       let msg = `✅ 자동 출고 완료!\n\n`;
       msg += `📅 출고일: ${shipDate}\n`;
@@ -3175,7 +3200,8 @@ function MappingView({ site, hqSpecs, brProducts, inventoryItems, inventoryConne
                         <select 
                           value={m.inventoryItemId} 
                           onChange={e => updateMapping(idx, 'inventoryItemId', e.target.value)}
-                          className="input-field flex-1"
+                          className="input-field flex-1 min-w-0"
+                          style={{ minWidth: '55%' }}
                         >
                           <option value="">자연 재고관리에서 부자재 선택</option>
                           <optgroup label={`📦 ${isHq ? '본점' : '지점'} 부자재`}>
@@ -3189,14 +3215,14 @@ function MappingView({ site, hqSpecs, brProducts, inventoryItems, inventoryConne
                           value={m.quantity}
                           onChange={e => updateMapping(idx, 'quantity', e.target.value)}
                           placeholder="개수"
-                          className="input-field w-24 text-center font-bold"
+                          className="input-field w-16 text-center font-bold flex-shrink-0"
                           step="0.01"
                           inputMode="decimal"
                         />
-                        <span className="text-xs text-stone-500 whitespace-nowrap">
+                        <span className="text-xs text-stone-500 whitespace-nowrap flex-shrink-0">
                           {selectedItem?.unit || 'EA'}/{isHq ? '판' : '박스'}
                         </span>
-                        <button onClick={() => removeMapping(idx)} className="text-stone-400 hover:text-red-500 p-1">
+                        <button onClick={() => removeMapping(idx)} className="text-stone-400 hover:text-red-500 p-1 flex-shrink-0">
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
